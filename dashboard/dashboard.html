@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Flow Tracker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+  <div class="dashboard">
+    <header class="header">
+      <div class="title-area">
+        <svg class="logo" width="40" height="40" viewBox="0 0 100 100" fill="none">
+          <defs>
+            <linearGradient id="orbGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#4A90E2"/>
+              <stop offset="100%" stop-color="#7C3AED"/>
+            </linearGradient>
+            <linearGradient id="glossGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+              <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.3"/>
+              <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.0"/>
+            </linearGradient>
+            <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="rgba(74, 144, 226, 0.3)" />
+            </filter>
+          </defs>
+          <circle cx="50" cy="50" r="42" fill="url(#orbGrad)" filter="url(#softShadow)" />
+          <circle cx="50" cy="50" r="42" fill="url(#glossGrad)" />
+          <circle cx="50" cy="50" r="24" fill="#FFFFFF" />
+          <path d="M50 34V50" stroke="url(#orbGrad)" stroke-width="5" stroke-linecap="round" />
+          <path d="M50 50L64 50" stroke="url(#orbGrad)" stroke-width="5" stroke-linecap="round" />
+          <circle cx="50" cy="50" r="4" fill="url(#orbGrad)" />
+        </svg>
+        <h1>Flow Tracker</h1>
+      </div>
+      <div class="header-actions">
+        <button id="settings-btn" class="btn-icon" title="Settings">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <nav class="date-nav">
+      <button id="prev-day" class="nav-btn" title="Previous day">
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <span id="date-label" class="date-label">Today</span>
+      <button id="next-day" class="nav-btn" title="Next day" disabled>
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M7.5 15L12.5 10L7.5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </nav>
+
+    <main>
+      <section class="overview">
+        <h2 id="overview-heading">TODAY'S OVERVIEW</h2>
+        <div class="card stat-card">
+          <span class="stat-label">TOTAL TIME TRACKED</span>
+          <span class="stat-value" id="total-time">0m</span>
+        </div>
+      </section>
+
+      <section class="visuals">
+        <div class="tabs glass-tabs">
+          <button class="tab active" data-view="trends">Trends</button>
+          <button class="tab" data-view="timeline">Timeline</button>
+          <button class="tab" data-view="domains">Domains</button>
+          <button class="tab" data-view="projects">Projects</button>
+          <button class="tab" data-view="insights">Insights</button>
+        </div>
+
+        <div id="view-trends" class="view-content active">
+
+          <!-- Weekly Digest Header -->
+          <div class="card digest-card">
+            <div class="digest-header">
+              <div>
+                <h3 class="digest-title">Weekly digest</h3>
+                <span class="digest-range" id="digest-range">Loading...</span>
+              </div>
+              <span class="digest-badge" id="digest-badge"></span>
+            </div>
+
+            <!-- Stats Row -->
+            <div class="digest-stats">
+              <div class="digest-stat">
+                <span class="digest-stat-label">Total time</span>
+                <span class="digest-stat-value" id="digest-total">—</span>
+                <span class="digest-stat-delta" id="digest-total-delta"></span>
+              </div>
+              <div class="digest-stat">
+                <span class="digest-stat-label">Daily avg</span>
+                <span class="digest-stat-value" id="digest-avg">—</span>
+                <span class="digest-stat-delta" id="digest-avg-delta"></span>
+              </div>
+              <div class="digest-stat">
+                <span class="digest-stat-label">Active days</span>
+                <span class="digest-stat-value" id="digest-active-days">—</span>
+                <span class="digest-stat-delta" id="digest-active-delta"></span>
+              </div>
+              <div class="digest-stat">
+                <span class="digest-stat-label">Peak day</span>
+                <span class="digest-stat-value" id="digest-peak-day">—</span>
+                <span class="digest-stat-delta" id="digest-peak-time"></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Day by Day -->
+          <div class="card digest-card">
+            <h4 class="digest-section-label">DAY BY DAY</h4>
+            <div class="day-by-day" id="day-by-day">
+              <!-- Generated by JS -->
+            </div>
+          </div>
+
+          <!-- Top Domains This Week -->
+          <div class="card digest-card">
+            <h4 class="digest-section-label">TOP DOMAINS THIS WEEK</h4>
+            <div class="digest-domains" id="digest-domains">
+              <!-- Generated by JS -->
+            </div>
+          </div>
+
+          <!-- Highlights -->
+          <div class="card digest-card">
+            <h4 class="digest-section-label">HIGHLIGHTS</h4>
+            <div class="highlights-grid">
+              <div class="highlight-cell">
+                <span class="highlight-label">Longest session</span>
+                <span class="highlight-value" id="hl-longest-val">—</span>
+                <span class="highlight-sub" id="hl-longest-sub"></span>
+              </div>
+              <div class="highlight-cell">
+                <span class="highlight-label">Peak hour</span>
+                <span class="highlight-value" id="hl-peak-val">—</span>
+                <span class="highlight-sub" id="hl-peak-sub"></span>
+              </div>
+              <div class="highlight-cell">
+                <span class="highlight-label">New this week</span>
+                <span class="highlight-value" id="hl-new-val">—</span>
+                <span class="highlight-sub" id="hl-new-sub"></span>
+              </div>
+              <div class="highlight-cell">
+                <span class="highlight-label">Dropped off</span>
+                <span class="highlight-value" id="hl-dropped-val">—</span>
+                <span class="highlight-sub" id="hl-dropped-sub"></span>
+              </div>
+            </div>
+            <div class="streak-section" id="streak-section">
+              <!-- Generated by JS -->
+            </div>
+          </div>
+
+        </div>
+
+        <div id="view-timeline" class="view-content">
+          <div class="card tl-card">
+            <h4 class="tl-section-label">TIME DISTRIBUTION</h4>
+            <div class="stacked-timeline-card">
+              <div class="distribution-summary" id="distribution-summary"></div>
+              <div class="stacked-timeline-bar" id="timeline-container"></div>
+              <div class="stacked-timeline-markers" id="timeline-legend"></div>
+            </div>
+          </div>
+
+          <div class="timeline-grid-two">
+            <div class="card tl-card">
+              <h4 class="tl-section-label">TOP DOMAINS</h4>
+              <div class="domain-pie-wrap" id="domain-pie-wrap"></div>
+            </div>
+
+            <div class="card tl-card">
+              <h4 class="tl-section-label">SWITCHING BEHAVIOR</h4>
+              <div class="switch-bars" id="switch-bar"></div>
+              <div class="switch-summary" id="switch-stats"></div>
+            </div>
+          </div>
+
+          <div class="card tl-card">
+            <h4 class="tl-section-label">SESSION QUALITY</h4>
+            <div class="session-cards" id="session-breakdown">
+              <!-- Generated by JS -->
+            </div>
+          </div>
+        </div>
+
+        <div id="view-domains" class="view-content">
+          <div class="card filter-card">
+            <div class="filter-pills">
+              <button class="filter-pill active">All</button>
+              <button class="filter-pill">Productive</button>
+              <button class="filter-pill">Neutral</button>
+              <button class="filter-pill">Distracting</button>
+              <button class="filter-pill">Untagged</button>
+            </div>
+            <div class="sort-by" style="display: flex; align-items: center; gap: 8px;">Sort: 
+              <select id="domain-sort-select" class="clean-input" style="font-size: 13px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border-input); background: transparent; color: var(--text-main); cursor: pointer; outline: none;">
+                <option value="time">Time spent</option>
+                <option value="visits">Visits</option>
+              </select>
+            </div>
+          </div>
+          <div class="card domain-card">
+            <h4 class="section-label">DOMAIN LIST</h4>
+            <div id="domain-list-grouped"></div>
+          </div>
+          <div class="card domain-card">
+            <h4 class="section-label">7-DAY HISTORY</h4>
+            <div id="domain-history-list"></div>
+          </div>
+          <div class="card domain-card">
+            <h4 class="section-label">DETAIL VIEW <span class="detail-hint">tap any domain to expand</span></h4>
+            <div id="domain-detail-view"></div>
+          </div>
+        </div>
+
+        <div id="view-projects" class="view-content">
+          <div class="card projects-card">
+            <h4 class="section-label">PROJECT FOCUS MODE</h4>
+            <div id="auto-tag-container"></div>
+          </div>
+          <div class="card projects-card">
+            <h4 class="section-label">PROJECTS</h4>
+            <div id="project-list-new"></div>
+            <button class="btn-outline-full show-new-project-btn">+ New project</button>
+          </div>
+          <div class="card projects-card">
+            <h4 class="section-label">THIS WEEK'S BREAKDOWN</h4>
+            <div id="project-breakdown-list"></div>
+          </div>
+        </div>
+
+        <div id="view-insights" class="view-content">
+          <div class="card heatmap-section">
+            <div class="heatmap-header">
+              <h4 class="section-label">WEEKLY HEATMAP</h4>
+              <div class="heatmap-legend-inline">
+                <span class="heatmap-legend-label">less</span>
+                <div class="heatmap-legend-gradient"></div>
+                <span class="heatmap-legend-label">more</span>
+              </div>
+            </div>
+            <div class="heatmap-container">
+              <div class="heatmap-y-axis" id="heatmap-y-axis"></div>
+              <div class="heatmap-grid" id="heatmap-grid"></div>
+              <div class="heatmap-x-axis" id="heatmap-x-axis"></div>
+            </div>
+          </div>
+
+          <div class="card insight-card-full">
+            <h4 class="section-label">PATTERNS</h4>
+            <div class="patterns-grid" id="patterns-grid"></div>
+          </div>
+
+          <div class="card insight-card-full">
+            <h4 class="section-label">ANOMALIES</h4>
+            <div class="anomalies-list" id="anomalies-list"></div>
+          </div>
+          
+          <div class="card insight-card-full">
+            <h4 class="section-label">RECOMMENDATIONS</h4>
+            <div class="recommendations-list" id="recommendations-list"></div>
+          </div>
+
+          <div class="card insight-card-full">
+            <h4 class="section-label">CORRELATIONS</h4>
+            <div class="correlations-grid" id="correlations-grid"></div>
+            <div style="display:none;">
+              <span id="insight-comparison"></span>
+              <span id="insight-comparison-sub"></span>
+              <span id="insight-switches"></span>
+              <span id="insight-switches-sub"></span>
+              <span id="insight-correlation"></span>
+            </div>
+          </div>
+        </div>
+
+      </section>
+    </main>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="modal-overlay" aria-hidden="true">
+    <div class="modal-card modal-card-settings">
+      <div class="modal-header">
+        <h3 class="modal-title">Settings</h3>
+        <button id="settings-close" class="btn-icon" aria-label="Close settings">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+      
+      <div class="settings-modal-body">
+        <h4 class="settings-group-label">APPEARANCE</h4>
+        <div class="settings-group">
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">Dark mode</span>
+              <span class="setting-desc">Switch to a darker theme for night time.</span>
+            </div>
+            <label class="toggle-switch">
+               <input type="checkbox" id="dark-mode-toggle">
+               <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <h4 class="settings-group-label">NOTIFICATIONS</h4>
+        <div class="settings-group">
+          <div class="setting-row border-bottom">
+            <div class="setting-info">
+              <span class="setting-name">Budget alerts</span>
+              <span class="setting-desc">Notify when a site or project reaches its time limit.</span>
+            </div>
+            <label class="toggle-switch">
+               <input type="checkbox" id="budget-alerts-toggle" checked>
+               <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="setting-row border-bottom">
+            <div class="setting-info">
+              <span class="setting-name">Daily summary</span>
+              <span class="setting-desc">Receive an end-of-day digest at a set time.</span>
+            </div>
+            <div class="setting-action-flex">
+              <input type="time" class="clean-input settings-time-input" value="18:00">
+              <label class="toggle-switch">
+                 <input type="checkbox" id="daily-summary-toggle" checked>
+                 <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">Anomaly alerts</span>
+              <span class="setting-desc">Ping when a site is unusually high or appears for the first time.</span>
+            </div>
+            <label class="toggle-switch">
+               <input type="checkbox" id="anomaly-alerts-toggle">
+               <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <h4 class="settings-group-label">DATA</h4>
+        <div class="settings-group">
+          <div class="setting-row border-bottom" style="align-items: flex-start; flex-direction: column; gap: 16px;">
+            <div class="setting-info">
+              <span class="setting-name">Export data</span>
+              <span class="setting-desc">Download your full tracking history in your preferred format.</span>
+            </div>
+            <div class="setting-action-row">
+              <button id="btn-export-csv" class="btn-outline-settings">Export CSV</button>
+              <button id="btn-export-json" class="btn-outline-settings">Export JSON</button>
+            </div>
+          </div>
+          <div class="setting-row" style="align-items: flex-start; flex-direction: column; gap: 16px;">
+            <div class="setting-info">
+              <span class="setting-name">Clear history</span>
+              <span class="setting-desc">Permanently delete tracked data. This cannot be undone — export first if needed.</span>
+            </div>
+            <div class="setting-action-row">
+              <select id="clear-data-range" class="clean-input settings-select-input">
+                <option value="7">Last 7 days</option>
+                <option value="30">Last 30 days</option>
+                <option value="all">All time</option>
+              </select>
+              <button id="clear-data-btn" class="btn-outline-settings">Clear data</button>
+            </div>
+          </div>
+        </div>
+        <div class="settings-hint-text">Last export: never</div>
+
+        <div class="settings-footer">
+          <span class="settings-version">Flow Tracker v2.3.0</span>
+          <a href="#" class="settings-feedback">Send feedback</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Project Modal -->
+  <div id="add-project-modal" class="modal-overlay" aria-hidden="true">
+    <div class="modal-card modal-card-settings" style="max-width: 400px;">
+      <div class="modal-header">
+        <h3 class="modal-title">New Project</h3>
+        <button id="add-project-close" class="btn-icon" aria-label="Close add project form">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+      
+      <div class="settings-modal-body">
+        <div class="settings-group" style="padding: 16px; display: flex; flex-direction: column; gap: 16px;">
+          <div>
+            <label class="setting-name" style="display:block; margin-bottom: 8px;">Project name</label>
+            <input type="text" id="new-project-name" class="clean-input" style="width: 100%; border: 1px solid var(--border-input); padding: 10px; border-radius: 8px;" placeholder="e.g. Thesis Research">
+          </div>
+          <div>
+            <label class="setting-name" style="display:block; margin-bottom: 8px;">Domain URL</label>
+            <input type="text" id="new-project-domain" class="clean-input" style="width: 100%; border: 1px solid var(--border-input); padding: 10px; border-radius: 8px;" placeholder="e.g. scholar.google.com">
+          </div>
+          <div>
+            <label class="setting-name" style="display:block; margin-bottom: 8px;">Weekly goal (hours)</label>
+            <input type="number" id="new-project-goal" class="clean-input" min="0" step="0.5" style="width: 100%; border: 1px solid var(--border-input); padding: 10px; border-radius: 8px;" placeholder="e.g. 8">
+          </div>
+        </div>
+      <div class="setting-action-row" style="margin-top: 16px; padding: 0 16px 16px; justify-content: flex-end;">
+          <button id="btn-save-project" class="btn-primary" style="width: 100%;">Create Project</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>
