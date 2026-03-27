@@ -37,7 +37,7 @@ The codebase is split into two main runtime areas:
   - `dashboard.css`
     The dark neon-glass visual system, layout, and chart styling.
   - `dashboard.js`
-    Data fetching, migration, rendering, interaction logic, insights generation, project tools, and view state.
+    Data fetching, rendering, interaction logic, insights generation, project tools, and view state.
 
 ## Tracking Model
 
@@ -78,6 +78,8 @@ Flow Tracker includes guardrails to keep the dataset usable:
 - Sessions shorter than 1 second are ignored.
 - Individual sessions are capped at 2 hours (`7200` seconds) to avoid runaway tracking corruption.
 - Sessions spanning midnight are split into two stored entries so the daily view remains correct.
+- Consecutive records on the same domain with gaps smaller than 3 minutes are stitched back into one continuous session.
+- Active sessions keep a rolling `lastSeenAt` heartbeat so shutdown, sleep, or long idle gaps are not accidentally counted as tracked browser time.
 
 ### Historical Day Storage
 
@@ -100,20 +102,20 @@ Example conceptual structure:
 }
 ```
 
-### Legacy Data Migration
+### Current Day Format
 
-Older formats are still recognized. The dashboard and background script both contain migration logic that upgrades legacy shapes such as:
-
-- `chunks`
-- `aggregates`
-
-into the current:
+The extension now uses one normalized day shape:
 
 - `sessions`
 
-model at read time.
+Each session can contain:
 
-This lets old installs continue working without a hard reset.
+- `domain`
+- `start`
+- `end`
+- `duration`
+- optional `productivityLabel`
+- optional `projectFocus`
 
 ## Data Integrity And Day Retrieval
 
@@ -283,36 +285,25 @@ Rationale:
 - preserves chronology
 - still communicates the category mix inside each hour
 
-#### Top Domains Pie
+#### Top Domains Donut
 
-The pie chart shows:
+The donut chart shows:
 
 - top 5 domains
 - everything else grouped into `Other`
+- a fixed, controlled palette so the card stays visually coherent across reloads
+- each legend row uses the exact same color as its matching donut slice
 
 It is interactive:
 
 - clicking a legend row highlights that slice
-- clicking the pie cycles the active slice
-- the center label updates to show the selected domain and share
+- clicking a donut slice activates the matching legend row and scrolls it into view
 
 Rationale:
 
-- the pie works best as a controlled categorical breakdown
+- the donut works best as a controlled categorical breakdown
 - limiting slices prevents unreadable fragmentation
-
-#### 3D Pie Aesthetic
-
-The chart is styled to feel dimensional through:
-
-- gloss overlays
-- shadow depth
-- slight tilt and scale on interaction
-- under-shadow beneath the chart body
-
-Rationale:
-
-- keeps the chart aligned with the extension’s current neon/dark aesthetic instead of feeling flat
+- the hollow center keeps the card visually lighter without losing categorical clarity
 
 #### Switching Behavior
 
@@ -443,12 +434,6 @@ Project mapping is stored in:
 
 - `projectMappings`
 
-and also mirrored to:
-
-- `projectsMap`
-
-for compatibility with earlier inconsistent saves.
-
 Weekly goals are stored in:
 
 - `projectGoals`
@@ -457,7 +442,7 @@ as seconds.
 
 Rationale:
 
-- compatibility storage prevents existing users from losing project definitions
+- one canonical mapping key keeps project state consistent and predictable
 
 ### New Project Flow
 
@@ -540,6 +525,8 @@ When clicked:
 Stored key:
 
 - `activeProjectFocus`
+
+While `activeProjectFocus` is running, every tracked browser session is attributed to that project through the session’s `projectFocus` field. This is intentional: the project focus timer is meant to represent "I am working on this project now," not "count only domains already mapped to this project."
 
 Rationale:
 
@@ -644,6 +631,38 @@ Internally, some renderers normalize those into:
 - distracted
 - neutral
 
+### How Focus Vs Scattered Is Determined
+
+The app does not store a separate raw `scattered` label. Instead it derives that idea from the stored session labels and switching behavior.
+
+A session is treated as `focused` when:
+
+- it has a session-level `productivityLabel` of `productive` or `focused`, or
+- its domain-level default label resolves to `productive` or `focused`
+
+A session is treated as `distracted` or effectively scattered when:
+
+- it has a session-level `productivityLabel` of `distracting` or `distraction`, or
+- its domain-level default label resolves to one of those values
+
+A session is treated as `neutral` when:
+
+- no explicit productive or distracting label exists
+
+Insights then interpret scattering from patterns on top of those labels:
+
+- quick checks under 3 minutes suggest fragmented browsing
+- elevated context switching suggests scattered attention even when labels are neutral
+- longer low-switching focused sessions are interpreted as deeper work
+
+### Domain Detail Stitching
+
+The Domains tab applies one extra presentation rule for revisit behavior:
+
+- if you leave a site and return to that same site in under 3 minutes, the detail view shows that as one grouped visit instead of two separate rows
+
+This keeps the detail list closer to how people experience a quick detour in practice while still summing only the domain’s real tracked duration.
+
 ### Why This Exists
 
 Raw browser duration is not enough. Two users can spend the same amount of time on the same site for completely different reasons.
@@ -703,6 +722,28 @@ This choice is central to the product rationale:
 - attention data is personal
 - focus tools should not become surveillance tools
 
+## Notifications
+
+The Settings modal now drives real notification behavior instead of placeholder toggles.
+
+### Budget Alerts
+
+- enabled through `Budget alerts`
+- currently notifies when a project reaches or exceeds its weekly goal
+- deduplicated per project per week so the same threshold crossing does not spam repeatedly
+
+### Daily Summary
+
+- enabled through `Daily summary`
+- scheduled with the selected time in the settings modal
+- sends one end-of-day notification with today’s total tracked time and top domain
+
+### Anomaly Alerts
+
+- enabled through `Anomaly alerts`
+- notifies when a domain appears for the first time in your recent local history
+- also notifies when a domain’s tracked time for today is significantly above its recent baseline
+
 ## Visual Design Rationale
 
 The dashboard uses a dark, neon-adjacent glass aesthetic because the extension is meant to feel:
@@ -732,14 +773,17 @@ The extension commonly uses these local-storage keys:
 
 - `activeSession`
   Current tracked browser tab session.
+  Includes `currentDomain`, `sessionStartTime`, and `lastSeenAt`.
 - `activeProjectFocus`
   Current dedicated project focus timer.
 - `projectMappings`
   Canonical domain-to-project mapping store.
-- `projectsMap`
-  Legacy compatibility mirror for project mappings.
 - `projectGoals`
   Project weekly goals in seconds.
+- `notificationPrefs`
+  Stores settings for budget alerts, daily summaries, anomaly alerts, and daily summary time.
+- `notificationState`
+  Keeps track of already-sent summaries and alert deduplication markers.
 - `productivityLabels`
   Default domain labels.
 - `energyTags`

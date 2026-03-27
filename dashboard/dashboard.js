@@ -21,22 +21,39 @@ document.addEventListener('DOMContentLoaded', async () => {
   let energyTags = {};
   let currentDomainFilter = 'all';
   let currentDomainSort = 'time';
+  let heatmapWeekOffset = 0;
   const FOCUS_COLOR = '#4A90E2';
   const DISTRACT_COLOR = '#F97316';
   const NEUTRAL_COLOR = '#7C3AED';
 
   // Sort dropdown
   const sortSelect = document.getElementById('domain-sort-select');
+  const heatmapPrevWeekBtn = document.getElementById('heatmap-prev-week');
+  const heatmapNextWeekBtn = document.getElementById('heatmap-next-week');
+  const heatmapRangeLabel = document.getElementById('heatmap-range-label');
   if (sortSelect) {
     sortSelect.addEventListener('change', (e) => {
       currentDomainSort = e.target.value;
       renderDomains(currentData.sessions);
     });
   }
+  if (heatmapPrevWeekBtn) {
+    heatmapPrevWeekBtn.addEventListener('click', () => {
+      heatmapWeekOffset += 1;
+      if (document.querySelector('.tab.active')?.dataset.view === 'insights') renderInsights();
+    });
+  }
+  if (heatmapNextWeekBtn) {
+    heatmapNextWeekBtn.addEventListener('click', () => {
+      if (heatmapWeekOffset === 0) return;
+      heatmapWeekOffset -= 1;
+      if (document.querySelector('.tab.active')?.dataset.view === 'insights') renderInsights();
+    });
+  }
 
   // Fetch initial storage
-  const storageInit = await browser.storage.local.get(['projectMappings', 'projectsMap', 'projectGoals', 'activeProjectFocus', 'productivityLabels', 'energyTags', 'darkMode', 'themePrefs']);
-  projectsMap = storageInit.projectMappings || storageInit.projectsMap || {};
+  const storageInit = await browser.storage.local.get(['projectMappings', 'projectGoals', 'activeProjectFocus', 'productivityLabels', 'energyTags', 'darkMode', 'themePrefs', 'notificationPrefs']);
+  projectsMap = storageInit.projectMappings || {};
   projectGoals = storageInit.projectGoals || {};
   activeProjectFocus = storageInit.activeProjectFocus || null;
   productivityLabels = storageInit.productivityLabels || {};
@@ -67,11 +84,35 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ─── Settings Preferences ───
   const darkModeToggle = document.getElementById('dark-mode-toggle');
+  const budgetAlertsToggle = document.getElementById('budget-alerts-toggle');
+  const dailySummaryToggle = document.getElementById('daily-summary-toggle');
+  const anomalyAlertsToggle = document.getElementById('anomaly-alerts-toggle');
+  const dailySummaryTimeInput = document.getElementById('daily-summary-time');
   const clearDataBtn = document.getElementById('clear-data-btn');
+  const notificationPrefs = {
+    budgetAlerts: storageInit.notificationPrefs?.budgetAlerts ?? true,
+    dailySummary: storageInit.notificationPrefs?.dailySummary ?? true,
+    dailySummaryTime: storageInit.notificationPrefs?.dailySummaryTime || '18:00',
+    anomalyAlerts: storageInit.notificationPrefs?.anomalyAlerts ?? false
+  };
 
   // Initialize toggle state from generic reading
   if (document.documentElement.classList.contains('dark-theme')) {
     if (darkModeToggle) darkModeToggle.checked = true;
+  }
+  if (budgetAlertsToggle) budgetAlertsToggle.checked = notificationPrefs.budgetAlerts;
+  if (dailySummaryToggle) dailySummaryToggle.checked = notificationPrefs.dailySummary;
+  if (anomalyAlertsToggle) anomalyAlertsToggle.checked = notificationPrefs.anomalyAlerts;
+  if (dailySummaryTimeInput) dailySummaryTimeInput.value = notificationPrefs.dailySummaryTime;
+
+  async function saveNotificationPrefs(nextPrefs = {}) {
+    Object.assign(notificationPrefs, nextPrefs);
+    await browser.storage.local.set({ notificationPrefs: { ...notificationPrefs } });
+    try {
+      await browser.runtime.sendMessage({ action: 'syncNotificationPrefs' });
+    } catch (error) {
+      console.warn('Failed to sync notification prefs:', error);
+    }
   }
 
   if (darkModeToggle) {
@@ -83,6 +124,26 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.documentElement.classList.remove('dark-theme');
       }
       await browser.storage.local.set({ darkMode: isDark });
+    });
+  }
+  if (budgetAlertsToggle) {
+    budgetAlertsToggle.addEventListener('change', (e) => {
+      saveNotificationPrefs({ budgetAlerts: e.target.checked });
+    });
+  }
+  if (dailySummaryToggle) {
+    dailySummaryToggle.addEventListener('change', (e) => {
+      saveNotificationPrefs({ dailySummary: e.target.checked });
+    });
+  }
+  if (anomalyAlertsToggle) {
+    anomalyAlertsToggle.addEventListener('change', (e) => {
+      saveNotificationPrefs({ anomalyAlerts: e.target.checked });
+    });
+  }
+  if (dailySummaryTimeInput) {
+    dailySummaryTimeInput.addEventListener('change', (e) => {
+      saveNotificationPrefs({ dailySummaryTime: e.target.value || '18:00' });
     });
   }
 
@@ -211,7 +272,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       } else if (!projectGoals[pName]) {
         projectGoals[pName] = 8 * 3600;
       }
-      await browser.storage.local.set({ projectMappings: projectsMap, projectsMap: projectsMap, projectGoals });
+      await browser.storage.local.set({ projectMappings: projectsMap, projectGoals });
       
       addProjectModal.classList.remove('open');
       addProjectModal.setAttribute('aria-hidden', 'true');
@@ -271,48 +332,27 @@ document.addEventListener('DOMContentLoaded', async () => {
   prevBtn.addEventListener('click', () => shiftDate(-1));
   nextBtn.addEventListener('click', () => shiftDate(1));
 
-  function migrateDayData(dayData) {
-    if (dayData && dayData.sessions) return dayData;
-    const sessions = [];
-    if (!dayData) return { sessions };
-    if (Array.isArray(dayData.chunks)) {
-      dayData.chunks.forEach(c => {
-        sessions.push({ domain: c.domain, start: c.start, end: c.end, duration: c.duration });
-      });
-    }
-    if (dayData.aggregates && typeof dayData.aggregates === 'object') {
-      for (const [domain, data] of Object.entries(dayData.aggregates)) {
-        if (typeof data === 'number') {
-          sessions.push({ domain, start: null, end: null, duration: data });
-        } else if (Array.isArray(data)) {
-          data.forEach(s => {
-            sessions.push({ domain, start: s.start || null, end: s.end || null, duration: s.duration });
-          });
-        }
-      }
-    }
-    return { sessions };
-  }
-
   function preprocessSessions(sessions) {
     if (!sessions || sessions.length === 0) return [];
     
-    // Only sort and merge sessions that HAVE start and end times
+    const SESSION_STITCH_GAP_MS = 3 * 60 * 1000;
     const valid = sessions.filter(s => s.start && s.end);
-    const legacy = sessions.filter(s => !s.start || !s.end);
     
-    if (valid.length === 0) return legacy;
+    if (valid.length === 0) return [];
 
     valid.sort((a,b) => a.start - b.start);
     const merged = [];
     let current = { ...valid[0] };
     for (let i = 1; i < valid.length; i++) {
         const next = valid[i];
-        if (next.domain === current.domain && (next.start - current.end) < 60000) {
+        if (next.domain === current.domain && (next.start - current.end) < SESSION_STITCH_GAP_MS) {
             current.end = next.end;
             current.duration = Math.floor((current.end - current.start) / 1000);
             if (next.productivityLabel && !current.productivityLabel) {
                 current.productivityLabel = next.productivityLabel;
+            }
+            if (next.projectFocus && !current.projectFocus) {
+                current.projectFocus = next.projectFocus;
             }
         } else {
             merged.push(current);
@@ -321,7 +361,43 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     merged.push(current);
     
-    return [...merged, ...legacy];
+    return merged;
+  }
+
+  function groupDomainDetailSessions(sessions, domain) {
+    const domainSessions = sessions
+      .filter(session => session.domain === domain && session.start && session.end)
+      .sort((a, b) => a.start - b.start);
+
+    if (domainSessions.length === 0) return [];
+
+    const grouped = [];
+    let current = {
+      start: domainSessions[0].start,
+      end: domainSessions[0].end,
+      duration: domainSessions[0].duration,
+      sessions: [domainSessions[0]]
+    };
+
+    for (let i = 1; i < domainSessions.length; i++) {
+      const next = domainSessions[i];
+      if ((next.start - current.end) < 3 * 60 * 1000) {
+        current.end = next.end;
+        current.duration += next.duration;
+        current.sessions.push(next);
+      } else {
+        grouped.push(current);
+        current = {
+          start: next.start,
+          end: next.end,
+          duration: next.duration,
+          sessions: [next]
+        };
+      }
+    }
+
+    grouped.push(current);
+    return grouped;
   }
 
   async function fetchDataForSelectedDate() {
@@ -330,7 +406,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         action: selectedDate === getTodayString() ? 'getLatestData' : 'getDayData',
         date: selectedDate
       });
-      currentData = migrateDayData(raw);
+      currentData = raw && Array.isArray(raw.sessions) ? raw : { sessions: [] };
       currentData.sessions = preprocessSessions(currentData.sessions);
       renderDashboard();
     } catch (e) {
@@ -370,7 +446,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     validSessions.forEach(s => {
       const classification = classifySession(s);
-      if (!currentGrp || (s.start - currentGrp.end > 5 * 60 * 1000)) {
+      if (!currentGrp || (s.start - currentGrp.end > 3 * 60 * 1000)) {
         currentGrp = {
           id: `grp_${s.start}`,
           start: s.start,
@@ -393,6 +469,34 @@ document.addEventListener('DOMContentLoaded', async () => {
     return groups;
   }
 
+  function getWeekDateKeys(offsetWeeks = 0) {
+    const base = new Date();
+    const day = base.getDay();
+    const mondayOffset = day === 0 ? 6 : day - 1;
+    base.setHours(0, 0, 0, 0);
+    base.setDate(base.getDate() - mondayOffset - (offsetWeeks * 7));
+    const keys = [];
+    for (let i = 0; i < 7; i++) {
+      const current = new Date(base);
+      current.setDate(base.getDate() + i);
+      keys.push(`${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, '0')}-${String(current.getDate()).padStart(2, '0')}`);
+    }
+    return keys;
+  }
+
+  function formatHeatmapRangeLabel(weekKeys) {
+    if (!weekKeys || weekKeys.length === 0) return '';
+    const parseKey = (key) => {
+      const [year, month, day] = key.split('-').map(Number);
+      return new Date(year, month - 1, day);
+    };
+    const start = parseKey(weekKeys[0]);
+    const end = parseKey(weekKeys[6]);
+    const startText = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const endText = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    return `${startText} - ${endText}`;
+  }
+
   function getProjectFocusElapsed() {
     if (!activeProjectFocus || !activeProjectFocus.startTime) return 0;
     return Math.max(0, Math.floor((Date.now() - activeProjectFocus.startTime) / 1000));
@@ -413,6 +517,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ─── Domain color palette ───
   function domainColor(domain) {
+    const palette = ['#4FD1C5', '#84CC3E', '#EC4899', '#F59E0B', '#38BDF8', '#94A3B8'];
     if (domain.includes('leetcode.com')) return '#FFA116';
     if (domain.includes('x.com') || domain.includes('twitter.com')) return '#1DA1F2';
     
@@ -420,8 +525,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     for (let i = 0; i < domain.length; i++) {
       hash = domain.charCodeAt(i) + ((hash << 5) - hash);
     }
-    const hue = ((hash % 360) + 360) % 360;
-    return `hsl(${hue}, 65%, 55%)`;
+    return palette[Math.abs(hash) % palette.length];
   }
 
   function renderDashboard() {
@@ -480,7 +584,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Compute per-day totals
     function dayTotal(key) {
-      const dd = migrateDayData(allData[key]);
+      const dd = allData[key] && Array.isArray(allData[key].sessions) ? allData[key] : { sessions: [] };
       return dd.sessions.reduce((a, s) => a + s.duration, 0);
     }
 
@@ -610,11 +714,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     const lastWeekDomains = {};
 
     thisWeekKeys.forEach(k => {
-      const dd = migrateDayData(allData[k]);
+      const dd = allData[k] && Array.isArray(allData[k].sessions) ? allData[k] : { sessions: [] };
       dd.sessions.forEach(s => { thisWeekDomains[s.domain] = (thisWeekDomains[s.domain] || 0) + s.duration; });
     });
     lastWeekKeys.forEach(k => {
-      const dd = migrateDayData(allData[k]);
+      const dd = allData[k] && Array.isArray(allData[k].sessions) ? allData[k] : { sessions: [] };
       dd.sessions.forEach(s => { lastWeekDomains[s.domain] = (lastWeekDomains[s.domain] || 0) + s.duration; });
     });
 
@@ -690,7 +794,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Longest session
     let longestSess = 0, longestDomain = '', longestDay = '';
     thisWeekKeys.forEach((k, i) => {
-      const dd = migrateDayData(allData[k]);
+      const dd = allData[k] && Array.isArray(allData[k].sessions) ? allData[k] : { sessions: [] };
       dd.sessions.forEach(s => {
         if (s.duration > longestSess) {
           longestSess = s.duration;
@@ -706,7 +810,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const hourBuckets = new Array(24).fill(0);
     const hourDays = new Array(24).fill(0).map(() => new Set());
     thisWeekKeys.forEach((k, dayI) => {
-      const dd = migrateDayData(allData[k]);
+      const dd = allData[k] && Array.isArray(allData[k].sessions) ? allData[k] : { sessions: [] };
       dd.sessions.forEach(s => {
         if (!s.start || !s.end) return;
         let cursor = new Date(s.start);
@@ -892,7 +996,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const sortedDomains = Object.entries(domainTotals).sort((a, b) => b[1] - a[1]);
     const topDomains = sortedDomains.slice(0, 5);
     const otherTotal = sortedDomains.slice(5).reduce((sum, [, duration]) => sum + duration, 0);
-    const pieParts = topDomains.map(([domain, duration]) => ({ name: domain, duration, color: domainColor(domain) }));
+    const topDomainPalette = ['#4FD1C5', '#84CC3E', '#EC4899', '#F59E0B', '#38BDF8'];
+    const pieParts = topDomains.map(([domain, duration], index) => ({ name: domain, duration, color: topDomainPalette[index % topDomainPalette.length] }));
     if (otherTotal > 0) pieParts.push({ name: 'Other', duration: otherTotal, color: '#64748b' });
     const pieScene = document.createElement('div');
     pieScene.className = 'pie-scene';
@@ -900,25 +1005,37 @@ document.addEventListener('DOMContentLoaded', async () => {
     pieGlow.className = 'pie-glow';
     const pieDisc = document.createElement('div');
     pieDisc.className = 'pie-disc';
+    const pieHole = document.createElement('div');
+    pieHole.className = 'pie-hole';
+    const pieInnerRatio = 0.28;
 
-    let currentDeg = -90;
-    const pieGradientParts = [];
+    let currentDeg = 270;
+    const pieGradientSegments = [];
     pieParts.forEach((part) => {
       const sweep = (part.duration / totalSeconds) * 360;
       const start = currentDeg;
       const end = currentDeg + sweep;
       part.midDeg = start + (sweep / 2);
-      const seam = Math.min(1.1, sweep * 0.08);
-      const innerStart = start + seam / 2;
-      const innerEnd = end - seam / 2;
-      pieGradientParts.push(`rgba(7, 10, 20, 0.92) ${start}deg ${Math.min(end, start + seam)}deg`);
-      if (innerEnd > innerStart) {
-        pieGradientParts.push(`${part.color} ${innerStart}deg ${innerEnd}deg`);
+      part.startDeg = start;
+      part.endDeg = end;
+
+      const normalizedStart = ((start % 360) + 360) % 360;
+      const normalizedEnd = ((end % 360) + 360) % 360;
+      if (end - start >= 360) {
+        pieGradientSegments.push({ color: part.color, start: 0, end: 360 });
+      } else if (normalizedEnd > normalizedStart) {
+        pieGradientSegments.push({ color: part.color, start: normalizedStart, end: normalizedEnd });
+      } else {
+        pieGradientSegments.push({ color: part.color, start: normalizedStart, end: 360 });
+        pieGradientSegments.push({ color: part.color, start: 0, end: normalizedEnd });
       }
-      pieGradientParts.push(`rgba(7, 10, 20, 0.92) ${Math.max(start, end - seam)}deg ${end}deg`);
+
       currentDeg = end;
     });
+    pieGradientSegments.sort((a, b) => a.start - b.start);
+    const pieGradientParts = pieGradientSegments.map(segment => `${segment.color} ${segment.start}deg ${segment.end}deg`);
     pieDisc.style.background = `conic-gradient(${pieGradientParts.join(', ') || `${NEUTRAL_COLOR} 0deg 360deg`})`;
+    pieDisc.appendChild(pieHole);
     pieScene.append(pieGlow, pieDisc);
     pieWrap.appendChild(pieScene);
 
@@ -931,6 +1048,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       pieScene.classList.add('active-slice');
       legendRows.forEach(row => row.classList.toggle('active', row.dataset.partName === active.name));
       pieScene.style.setProperty('--pie-active-color', `${active.color}55`);
+      const activeRow = legendRows.find(row => row.dataset.partName === active.name);
+      if (activeRow) {
+        activeRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }
     };
 
     pieParts.forEach((part, index) => {
@@ -954,11 +1075,27 @@ document.addEventListener('DOMContentLoaded', async () => {
       legendRows.push(row);
       pieLegend.appendChild(row);
     });
-    pieScene.addEventListener('click', () => {
-      const activeRow = legendRows.find(row => row.classList.contains('active'));
-      const currentIndex = activeRow ? legendRows.indexOf(activeRow) : 0;
-      const next = pieParts[(currentIndex + 1) % pieParts.length];
-      if (next) setActivePiePart(next.name);
+    pieDisc.addEventListener('click', (event) => {
+      const rect = pieDisc.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const dx = event.clientX - centerX;
+      const dy = event.clientY - centerY;
+      const distance = Math.sqrt((dx * dx) + (dy * dy));
+      const outerRadius = rect.width / 2;
+      const innerRadius = outerRadius * pieInnerRatio;
+
+      if (distance < innerRadius || distance > outerRadius) return;
+
+      const rawAngle = (Math.atan2(dy, dx) * 180 / Math.PI + 90 + 360) % 360;
+      const hit = pieParts.find((part) => {
+        const start = (part.startDeg + 360) % 360;
+        const end = (part.endDeg + 360) % 360;
+        if (start <= end) return rawAngle >= start && rawAngle <= end;
+        return rawAngle >= start || rawAngle <= end;
+      });
+
+      if (hit) setActivePiePart(hit.name);
     });
     if (pieParts.length) setActivePiePart(pieParts[0].name);
     pieWrap.appendChild(pieLegend);
@@ -1230,13 +1367,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     let currentTag = productivityLabels[topDom] || 'untagged';
     if (currentTag === 'distraction') currentTag = 'distracting';
 
-    const todayDomainSessions = currentData.sessions.filter(s => s.domain === topDom);
+    const todayDomainSessions = groupDomainDetailSessions(currentData.sessions, topDom);
     const sessFrag = document.createDocumentFragment();
     todayDomainSessions.forEach((s, idx) => {
       const startObj = new Date(s.start);
       const timeStr = startObj.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
       const durStr = formatTime(s.duration);
-      const tag = s.productivityLabel || productivityLabels[topDom] || 'untagged';
+      const taggedSession = s.sessions.find(session => session.productivityLabel);
+      const tag = (taggedSession && taggedSession.productivityLabel) || productivityLabels[topDom] || 'untagged';
       
       let colorVar = 'var(--text-muted)';
       if (tag === 'productive') colorVar = 'var(--label-productive)';
@@ -1383,22 +1521,24 @@ document.addEventListener('DOMContentLoaded', async () => {
       sel.addEventListener('change', async (e) => {
         const idx = parseInt(e.target.dataset.idx);
         const newTag = e.target.value;
-        const targetSession = todayDomainSessions[idx];
-        
-        // Find it in the main currentData.sessions array and update
-        const mainIdx = currentData.sessions.findIndex(s => s === targetSession);
-        if (mainIdx !== -1) {
-          currentData.sessions[mainIdx].productivityLabel = newTag;
-          
-          const objToSave = {};
-          const dataToSave = JSON.parse(JSON.stringify(currentData));
-          dataToSave.sessions = dataToSave.sessions.filter(s => !s.ongoing);
-          objToSave[selectedDate] = dataToSave;
-          await browser.storage.local.set(objToSave);
-          
-          renderDomains(currentData.sessions);
-          showDomainDetail(topDom, currentLabel, topDur, sessionsCount);
-        }
+        const targetGroup = todayDomainSessions[idx];
+        if (!targetGroup) return;
+
+        targetGroup.sessions.forEach((groupedSession) => {
+          const mainIdx = currentData.sessions.findIndex(s => s === groupedSession);
+          if (mainIdx !== -1) {
+            currentData.sessions[mainIdx].productivityLabel = newTag;
+          }
+        });
+
+        const objToSave = {};
+        const dataToSave = JSON.parse(JSON.stringify(currentData));
+        dataToSave.sessions = dataToSave.sessions.filter(s => !s.ongoing);
+        objToSave[selectedDate] = dataToSave;
+        await browser.storage.local.set(objToSave);
+
+        renderDomains(currentData.sessions);
+        showDomainDetail(topDom, currentLabel, topDur, sessionsCount);
       });
     });
 
@@ -1413,12 +1553,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function domainColor(str) {
+    const palette = ['#4FD1C5', '#84CC3E', '#EC4899', '#F59E0B', '#38BDF8', '#94A3B8'];
     if (str.includes('leetcode.com')) return '#FFA116';
     if (str.includes('x.com') || str.includes('twitter.com')) return '#1DA1F2';
     
     let hash = 0;
     for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
-    return `hsl(${hash % 360}, 65%, 55%)`;
+    return palette[Math.abs(hash) % palette.length];
   }
 
   // ─── Projects List ───
@@ -1459,14 +1600,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     let totalThisWeek = 0;
 
     dateKeys.forEach(dk => {
-      const dayData = migrateDayData(allData[dk]);
+      const dayData = allData[dk] && Array.isArray(allData[dk].sessions) ? allData[dk] : { sessions: [] };
       if (!dayData || !dayData.sessions) return;
       const isThisWeek = thisWeekKeys.includes(dk);
       const activeProjectsOnDay = new Set();
 
       dayData.sessions.forEach(s => {
         if (!s.domain) return;
-        const pName = projectsMap[s.domain] || 'Unassigned';
+        const pName = s.projectFocus || projectsMap[s.domain] || 'Unassigned';
         if (!projStats[pName]) {
           projStats[pName] = { allTime: 0, thisWeek: 0, daysActive: new Set(), domains: new Set() };
         }
@@ -1548,6 +1689,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         stopBtn.addEventListener('click', async () => {
           activeProjectFocus = null;
           await browser.storage.local.set({ activeProjectFocus: null });
+          await browser.runtime.sendMessage({ action: 'syncProjectFocusBoundary' });
           renderProjects(currentData.sessions || []);
         });
         actions.appendChild(stopBtn);
@@ -1603,6 +1745,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           startBtn.addEventListener('click', async () => {
             activeProjectFocus = isFocusActive ? null : { projectName: projName, startTime: Date.now() };
             await browser.storage.local.set({ activeProjectFocus });
+            await browser.runtime.sendMessage({ action: 'syncProjectFocusBoundary' });
             renderProjects(currentData.sessions || []);
           });
           const statPill = document.createElement('div'); statPill.className = `proj-status-pill ${statusClass}`; statPill.textContent = statusText;
@@ -1638,9 +1781,9 @@ document.addEventListener('DOMContentLoaded', async () => {
           goalEdit.className = 'project-goal-edit';
           goalEdit.hidden = true;
           const goalInput = document.createElement('input');
-          goalInput.type = 'number';
-          goalInput.min = '0';
-          goalInput.step = '0.5';
+          goalInput.type = 'text';
+          goalInput.inputMode = 'decimal';
+          goalInput.setAttribute('pattern', '[0-9]*[.]?[0-9]+');
           goalInput.className = 'clean-input project-goal-input';
           goalInput.value = (stats.goalSecs / 3600).toString();
           goalInput.placeholder = 'Hours';
@@ -1648,7 +1791,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           goalSaveBtn.className = 'goal-mini-btn confirm';
           goalSaveBtn.textContent = 'Save';
           goalSaveBtn.addEventListener('click', async () => {
-            const nextHours = Number(goalInput.value);
+            const nextHours = Number(goalInput.value.trim());
             if (!(nextHours > 0)) {
               alert('Enter a weekly goal greater than 0 hours.');
               return;
@@ -1766,17 +1909,21 @@ document.addEventListener('DOMContentLoaded', async () => {
       const ds = `${past.getFullYear()}-${String(past.getMonth() + 1).padStart(2, '0')}-${String(past.getDate()).padStart(2, '0')}`;
       dateKeys.push(ds);
     }
-
-    const allData = await browser.storage.local.get(dateKeys);
+    const heatmapWeekKeys = getWeekDateKeys(heatmapWeekOffset);
+    const allData = await browser.storage.local.get([...new Set([...dateKeys, ...heatmapWeekKeys])]);
 
     // ── 7-day comparison ──
     let thisWeekTotal = 0;
     for (let i = 0; i < 7; i++) {
-      const dataDay = migrateDayData(allData[dateKeys[i]]);
+      const dataDay = allData[dateKeys[i]] && Array.isArray(allData[dateKeys[i]].sessions)
+        ? allData[dateKeys[i]]
+        : { sessions: [] };
       thisWeekTotal += dataDay.sessions.reduce((acc, s) => acc + s.duration, 0);
     }
     const sevenDayAvg = thisWeekTotal / 7;
-    const todayData = migrateDayData(allData[dateKeys[0]]);
+    const todayData = allData[dateKeys[0]] && Array.isArray(allData[dateKeys[0]].sessions)
+      ? allData[dateKeys[0]]
+      : { sessions: [] };
     const todayTotal = todayData.sessions.reduce((acc, s) => acc + s.duration, 0);
 
     const compValEl = document.getElementById('insight-comparison');
@@ -1814,8 +1961,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const heatmapData = Array(7).fill(0).map(() => Array(24).fill(0));
     const correlationData = Array(7).fill(0).map(() => Array(4).fill(0));
 
-    dateKeys.forEach(dk => {
-      const dayData = migrateDayData(allData[dk]);
+    heatmapWeekKeys.forEach(dk => {
+      const dayData = allData[dk] && Array.isArray(allData[dk].sessions) ? allData[dk] : { sessions: [] };
       if (!dayData || !dayData.sessions) return;
       dayData.sessions.forEach(s => {
         if (!s.start || !s.end) return;
@@ -1883,9 +2030,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     grid.textContent = '';
     const xAxis = document.getElementById('heatmap-x-axis');
     xAxis.textContent = '';
+    const heatmapSection = document.querySelector('.heatmap-section');
+    if (heatmapRangeLabel) heatmapRangeLabel.textContent = formatHeatmapRangeLabel(heatmapWeekKeys);
+    if (heatmapNextWeekBtn) heatmapNextWeekBtn.disabled = heatmapWeekOffset === 0;
 
     const displayDayOrder = [1, 2, 3, 4, 5, 6, 0];
     const shortDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const weekDateByDay = {};
+    heatmapWeekKeys.forEach((dateKey) => {
+      const [year, month, day] = dateKey.split('-').map(Number);
+      weekDateByDay[new Date(year, month - 1, day).getDay()] = dateKey;
+    });
 
     shortDays.forEach(sd => {
       const dEl = document.createElement('div');
@@ -1920,15 +2075,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
           // Compute the date for this cell (approx: find dated match)
           const fullDayName = dayNames[dIdx];
-          cell.title = `${shortDays[rowIdx]} ${hr}:00 – ${formatTime(val)} (28-day total)\nClick to view this day`;
+          cell.title = `${shortDays[rowIdx]} ${hr}:00 - ${formatTime(val)}\nClick to view this day`;
 
-          // Click to navigate to a date with this day of week
           cell.addEventListener('click', () => {
-            // Find the most recent date matching this dayOfWeek in our 28-day window
-            const target = dateKeys.find(dk => {
-              const [y, mo, da] = dk.split('-').map(Number);
-              return new Date(y, mo - 1, da).getDay() === dIdx;
-            });
+            const target = weekDateByDay[dIdx];
             if (target) {
               selectedDate = target;
               updateDateUI();
@@ -1951,20 +2101,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Empty state hint — remove any previous one first
     const existingHint = document.getElementById('heatmap-empty-hint');
     if (existingHint) existingHint.remove();
+    if (heatmapSection) heatmapSection.classList.toggle('is-empty', !hasAnyData);
 
     if (!hasAnyData) {
       const hint = document.createElement('div');
       hint.id = 'heatmap-empty-hint';
-      hint.className = 'empty-state';
-      hint.style.margin = '24px 0 0';
-      // User specifically requested to organically remove the text entirely
-      grid.after(hint);
+      hint.className = 'heatmap-empty-state';
+      hint.textContent = 'No tracked activity in this week.';
+      xAxis.after(hint);
     }
 
     // ── Patterns, Anomalies, Recs, Correlations ──
     let recentSessions = [];
     dateKeys.forEach(dk => {
-      const dData = migrateDayData(allData[dk]);
+      const dData = allData[dk] && Array.isArray(allData[dk].sessions) ? allData[dk] : { sessions: [] };
       if (!dData || !dData.sessions) return;
       dData.sessions.forEach(s => {
         if (s.start && s.end) recentSessions.push(s);
@@ -2062,7 +2212,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const pairings = {};
 
       dateKeys.forEach(dk => {
-        const dData = migrateDayData(allData[dk]);
+        const dData = allData[dk] && Array.isArray(allData[dk].sessions) ? allData[dk] : { sessions: [] };
         if (!dData || !dData.sessions) return;
         
         const dateObj = new Date(dk);
@@ -2166,8 +2316,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // Legacy CSV logic safely eradicated.
-
   // ─── Init ───
   updateDateUI();
   fetchDataForSelectedDate();
@@ -2176,12 +2324,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (area === 'local') {
       const today = getTodayString();
       if (selectedDate === today && changes[today]) {
-        currentData = migrateDayData(changes[today].newValue || { sessions: [] });
+        currentData = changes[today].newValue && Array.isArray(changes[today].newValue.sessions)
+          ? changes[today].newValue
+          : { sessions: [] };
         currentData.sessions = preprocessSessions(currentData.sessions);
         renderDashboard();
       }
-      if (changes.projectMappings || changes.projectsMap) {
-        projectsMap = (changes.projectMappings && changes.projectMappings.newValue) || (changes.projectsMap && changes.projectsMap.newValue) || projectsMap;
+      if (changes.projectMappings) {
+        projectsMap = changes.projectMappings.newValue || projectsMap;
         renderProjects(currentData.sessions || []);
       }
       if (changes.projectGoals) {

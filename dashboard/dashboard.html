@@ -238,7 +238,14 @@
         <div id="view-insights" class="view-content">
           <div class="card heatmap-section">
             <div class="heatmap-header">
-              <h4 class="section-label">WEEKLY HEATMAP</h4>
+              <div class="heatmap-header-main">
+                <h4 class="section-label">WEEKLY HEATMAP</h4>
+                <div class="heatmap-nav">
+                  <button id="heatmap-prev-week" class="heatmap-nav-btn" aria-label="Previous heatmap week">Previous</button>
+                  <span id="heatmap-range-label" class="heatmap-range-label"></span>
+                  <button id="heatmap-next-week" class="heatmap-nav-btn" aria-label="Next heatmap week">Next</button>
+                </div>
+              </div>
               <div class="heatmap-legend-inline">
                 <span class="heatmap-legend-label">less</span>
                 <div class="heatmap-legend-gradient"></div>
@@ -316,7 +323,7 @@
           <div class="setting-row border-bottom">
             <div class="setting-info">
               <span class="setting-name">Budget alerts</span>
-              <span class="setting-desc">Notify when a site or project reaches its time limit.</span>
+              <span class="setting-desc">Notify when a project reaches its weekly goal.</span>
             </div>
             <label class="toggle-switch">
                <input type="checkbox" id="budget-alerts-toggle" checked>
@@ -329,7 +336,7 @@
               <span class="setting-desc">Receive an end-of-day digest at a set time.</span>
             </div>
             <div class="setting-action-flex">
-              <input type="time" class="clean-input settings-time-input" value="18:00">
+              <input type="time" id="daily-summary-time" class="clean-input settings-time-input" value="18:00">
               <label class="toggle-switch">
                  <input type="checkbox" id="daily-summary-toggle" checked>
                  <span class="toggle-slider"></span>
@@ -409,7 +416,7 @@
           </div>
           <div>
             <label class="setting-name" style="display:block; margin-bottom: 8px;">Weekly goal (hours)</label>
-            <input type="number" id="new-project-goal" class="clean-input" min="0" step="0.5" style="width: 100%; border: 1px solid var(--border-input); padding: 10px; border-radius: 8px;" placeholder="e.g. 8">
+            <input type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]+" id="new-project-goal" class="clean-input" style="width: 100%; border: 1px solid var(--border-input); padding: 10px; border-radius: 8px;" placeholder="e.g. 8">
           </div>
         </div>
       <div class="setting-action-row" style="margin-top: 16px; padding: 0 16px 16px; justify-content: flex-end;">
