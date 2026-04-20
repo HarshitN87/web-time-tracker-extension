@@ -2,6 +2,7 @@
 
 const MAX_SESSION_SECONDS = 7200; // 2-hour cap — anything longer is a tracking error
 const ACTIVE_SESSION_STALE_MS = 45000;
+const STARTUP_STALE_SESSION_MS = 5 * 60 * 1000;
 const DEFAULT_NOTIFICATION_PREFS = {
   budgetAlerts: true,
   dailySummary: true,
@@ -392,6 +393,15 @@ async function startSession(url) {
 
 // ─── State Checking ───
 
+async function clearStaleStartupSession() {
+  const { currentDomain, lastSeenAt } = await getActiveSession();
+  if (!currentDomain || !lastSeenAt) return;
+  if ((Date.now() - lastSeenAt) <= STARTUP_STALE_SESSION_MS) return;
+
+  console.log('[Flow Tracker] Cleared stale startup session');
+  await setActiveSession(null, null);
+}
+
 async function checkCurrentState() {
   try {
     const window = await browser.windows.getLastFocused();
@@ -452,7 +462,9 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 browser.windows.onFocusChanged.addListener(queueStateCheck);
 
 // Initial start
-queueStateCheck();
+clearStaleStartupSession()
+  .catch(e => console.error("Error clearing stale startup session:", e))
+  .finally(queueStateCheck);
 setInterval(queueStateCheck, 15000);
 syncDailySummaryAlarm().catch(console.error);
 

@@ -82,18 +82,24 @@
                 <h3 class="digest-title">Weekly digest</h3>
                 <span class="digest-range" id="digest-range">Loading...</span>
               </div>
-              <span class="digest-badge" id="digest-badge"></span>
+              <div class="digest-header-actions">
+                <div class="trend-toggle" aria-label="Trend metric">
+                  <button class="trend-toggle-btn active" data-trend-metric="time">Time</button>
+                  <button class="trend-toggle-btn" data-trend-metric="visits">Visits</button>
+                </div>
+                <span class="digest-badge" id="digest-badge"></span>
+              </div>
             </div>
 
             <!-- Stats Row -->
             <div class="digest-stats">
               <div class="digest-stat">
-                <span class="digest-stat-label">Total time</span>
+                <span class="digest-stat-label" id="digest-total-label">Total time</span>
                 <span class="digest-stat-value" id="digest-total">—</span>
                 <span class="digest-stat-delta" id="digest-total-delta"></span>
               </div>
               <div class="digest-stat">
-                <span class="digest-stat-label">Daily avg</span>
+                <span class="digest-stat-label" id="digest-avg-label">Daily avg</span>
                 <span class="digest-stat-value" id="digest-avg">—</span>
                 <span class="digest-stat-delta" id="digest-avg-delta"></span>
               </div>
@@ -168,6 +174,11 @@
             </div>
           </div>
 
+          <div class="card tl-card">
+            <h4 class="tl-section-label">HOUR BY HOUR USAGE</h4>
+            <div class="hourly-usage-card" id="hourly-usage-graph"></div>
+          </div>
+
           <div class="timeline-grid-two">
             <div class="card tl-card">
               <h4 class="tl-section-label">TOP DOMAINS</h4>
@@ -210,8 +221,12 @@
             <div id="domain-list-grouped"></div>
           </div>
           <div class="card domain-card">
-            <h4 class="section-label">7-DAY HISTORY</h4>
-            <div id="domain-history-list"></div>
+            <h4 class="section-label">DOMAIN SIGNALS</h4>
+            <div id="domain-insights-panel"></div>
+          </div>
+          <div class="card domain-card">
+            <h4 class="section-label">ALL-TIME TOP WEBSITES</h4>
+            <div id="all-time-domain-list"></div>
           </div>
           <div class="card domain-card">
             <h4 class="section-label">DETAIL VIEW <span class="detail-hint">tap any domain to expand</span></h4>

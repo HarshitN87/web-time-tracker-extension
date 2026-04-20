@@ -21,6 +21,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   let energyTags = {};
   let currentDomainFilter = 'all';
   let currentDomainSort = 'time';
+  let trendMetric = 'time';
   let heatmapWeekOffset = 0;
   const FOCUS_COLOR = '#4A90E2';
   const DISTRACT_COLOR = '#F97316';
@@ -50,6 +51,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (document.querySelector('.tab.active')?.dataset.view === 'insights') renderInsights();
     });
   }
+  document.querySelectorAll('.trend-toggle-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      trendMetric = btn.dataset.trendMetric || 'time';
+      document.querySelectorAll('.trend-toggle-btn').forEach(toggle => {
+        toggle.classList.toggle('active', toggle === btn);
+      });
+      renderWeeklyDigest();
+    });
+  });
 
   // Fetch initial storage
   const storageInit = await browser.storage.local.get(['projectMappings', 'projectGoals', 'activeProjectFocus', 'productivityLabels', 'energyTags', 'darkMode', 'themePrefs', 'notificationPrefs']);
@@ -484,6 +494,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     return keys;
   }
 
+  function getWeekDateKeysForDate(dateStr) {
+    const [year, month, day] = dateStr.split('-').map(Number);
+    const base = new Date(year, month - 1, day);
+    const weekday = base.getDay();
+    const mondayOffset = weekday === 0 ? 6 : weekday - 1;
+    base.setHours(0, 0, 0, 0);
+    base.setDate(base.getDate() - mondayOffset);
+    const keys = [];
+    for (let i = 0; i < 7; i++) {
+      const current = new Date(base);
+      current.setDate(base.getDate() + i);
+      keys.push(`${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, '0')}-${String(current.getDate()).padStart(2, '0')}`);
+    }
+    return keys;
+  }
+
   function formatHeatmapRangeLabel(weekKeys) {
     if (!weekKeys || weekKeys.length === 0) return '';
     const parseKey = (key) => {
@@ -546,6 +572,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ─── Weekly Digest ───
   async function renderWeeklyDigest() {
+    const isVisitMetric = trendMetric === 'visits';
+    const formatDigestMetric = (value) => isVisitMetric
+      ? `${value} visit${value === 1 ? '' : 's'}`
+      : formatTime(value);
     const today = new Date();
     const todayStr = getTodayString();
     const dayOfWeek = today.getDay(); // 0=Sun
@@ -585,7 +615,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Compute per-day totals
     function dayTotal(key) {
       const dd = allData[key] && Array.isArray(allData[key].sessions) ? allData[key] : { sessions: [] };
-      return dd.sessions.reduce((a, s) => a + s.duration, 0);
+      return isVisitMetric
+        ? dd.sessions.length
+        : dd.sessions.reduce((a, s) => a + s.duration, 0);
     }
 
     const thisWeekTotals = thisWeekKeys.map(dayTotal);
@@ -611,6 +643,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     sundayDate.setDate(thisMonday.getDate() + 6);
     const rangeEnd = sundayDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
     document.getElementById('digest-range').textContent = `${rangeStart} – ${rangeEnd}`;
+    const totalLabel = document.getElementById('digest-total-label');
+    const avgLabel = document.getElementById('digest-avg-label');
+    if (totalLabel) totalLabel.textContent = isVisitMetric ? 'Total visits' : 'Total time';
+    if (avgLabel) avgLabel.textContent = isVisitMetric ? 'Daily visits' : 'Daily avg';
 
     // Badge
     const badge = document.getElementById('digest-badge');
@@ -639,27 +675,27 @@ document.addEventListener('DOMContentLoaded', async () => {
       const diff = current - previous;
       if (diff > 0) {
         el.classList.add('up');
-        el.textContent = `↑ ${isFmt ? formatTime(diff) : diff}`;
+        el.textContent = `↑ ${isFmt ? formatDigestMetric(diff) : diff}`;
       } else if (diff < 0) {
         el.classList.add('down');
-        el.textContent = `↓ ${isFmt ? formatTime(Math.abs(diff)) : Math.abs(diff)}`;
+        el.textContent = `↓ ${isFmt ? formatDigestMetric(Math.abs(diff)) : Math.abs(diff)}`;
       } else {
         el.classList.add('same');
         el.textContent = 'same';
       }
     }
 
-    document.getElementById('digest-total').textContent = formatTime(thisWeekSum);
+    document.getElementById('digest-total').textContent = formatDigestMetric(thisWeekSum);
     setDelta(document.getElementById('digest-total-delta'), thisWeekSum, lastWeekSum, true);
 
-    document.getElementById('digest-avg').textContent = formatTime(thisAvg);
+    document.getElementById('digest-avg').textContent = formatDigestMetric(thisAvg);
     setDelta(document.getElementById('digest-avg-delta'), thisAvg, lastAvg, true);
 
     document.getElementById('digest-active-days').textContent = `${thisActiveDays} / 7`;
     setDelta(document.getElementById('digest-active-delta'), thisActiveDays, lastActiveDays, false);
 
     document.getElementById('digest-peak-day').textContent = thisWeekTotals[peakIdx] > 0 ? fullDayNames[peakIdx] : '—';
-    document.getElementById('digest-peak-time').textContent = thisWeekTotals[peakIdx] > 0 ? formatTime(thisWeekTotals[peakIdx]) : '';
+    document.getElementById('digest-peak-time').textContent = thisWeekTotals[peakIdx] > 0 ? formatDigestMetric(thisWeekTotals[peakIdx]) : '';
     document.getElementById('digest-peak-time').className = 'digest-stat-delta';
 
     // Day by Day
@@ -700,7 +736,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       const timeEl = document.createElement('div');
       timeEl.className = `day-time${isToday ? ' is-today' : ''}`;
-      timeEl.textContent = thisWeekTotals[i] > 0 ? formatTime(thisWeekTotals[i]) : (isFuture ? '' : '—');
+      timeEl.textContent = thisWeekTotals[i] > 0 ? formatDigestMetric(thisWeekTotals[i]) : (isFuture ? '' : '—');
       row.appendChild(timeEl);
 
       dayByDay.appendChild(row);
@@ -715,11 +751,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     thisWeekKeys.forEach(k => {
       const dd = allData[k] && Array.isArray(allData[k].sessions) ? allData[k] : { sessions: [] };
-      dd.sessions.forEach(s => { thisWeekDomains[s.domain] = (thisWeekDomains[s.domain] || 0) + s.duration; });
+      dd.sessions.forEach(s => { thisWeekDomains[s.domain] = (thisWeekDomains[s.domain] || 0) + (isVisitMetric ? 1 : s.duration); });
     });
     lastWeekKeys.forEach(k => {
       const dd = allData[k] && Array.isArray(allData[k].sessions) ? allData[k] : { sessions: [] };
-      dd.sessions.forEach(s => { lastWeekDomains[s.domain] = (lastWeekDomains[s.domain] || 0) + s.duration; });
+      dd.sessions.forEach(s => { lastWeekDomains[s.domain] = (lastWeekDomains[s.domain] || 0) + (isVisitMetric ? 1 : s.duration); });
     });
 
     const sortedDomains = Object.entries(thisWeekDomains).sort((a, b) => b[1] - a[1]).slice(0, 5);
@@ -755,7 +791,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       const time = document.createElement('span');
       time.className = 'digest-domain-time';
-      time.textContent = formatTime(dur);
+      time.textContent = formatDigestMetric(dur);
       row.appendChild(time);
 
       const delta = document.createElement('span');
@@ -768,10 +804,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         const diff = dur - prevDur;
         if (diff > 0) {
           delta.classList.add('up');
-          delta.textContent = `↑ ${formatTime(diff)}`;
+          delta.textContent = `↑ ${formatDigestMetric(diff)}`;
         } else if (diff < 0) {
           delta.classList.add('down');
-          delta.textContent = `↓ ${formatTime(Math.abs(diff))}`;
+          delta.textContent = `↓ ${formatDigestMetric(Math.abs(diff))}`;
         } else {
           delta.classList.add('same');
           delta.textContent = '—';
@@ -896,14 +932,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     const switchBar = document.getElementById('switch-bar');
     const switchStats = document.getElementById('switch-stats');
     const sessionCards = document.getElementById('session-breakdown');
+    const hourlyUsageGraph = document.getElementById('hourly-usage-graph');
 
-    [timelineBar, timelineMarkers, distributionSummary, pieWrap, switchBar, switchStats, sessionCards].forEach(el => {
+    [timelineBar, timelineMarkers, distributionSummary, pieWrap, switchBar, switchStats, sessionCards, hourlyUsageGraph].forEach(el => {
       if (el) el.textContent = '';
     });
 
     const validSessions = sessions.filter(s => s.start && s.end).sort((a, b) => a.start - b.start);
     if (validSessions.length === 0) {
-      [timelineBar, pieWrap, switchBar, sessionCards].forEach(el => {
+      [timelineBar, pieWrap, switchBar, sessionCards, hourlyUsageGraph].forEach(el => {
         if (!el) return;
         const emptyDiv = document.createElement('div');
         emptyDiv.className = 'empty-state';
@@ -988,6 +1025,58 @@ document.addEventListener('DOMContentLoaded', async () => {
       marker.textContent = label;
       timelineMarkers.appendChild(marker);
     });
+
+    if (hourlyUsageGraph) {
+      const maxHourTotal = Math.max(...hourBuckets.map(bucket => bucket.focused + bucket.distracted + bucket.neutral), 1);
+      const graphWrap = document.createElement('div');
+      graphWrap.className = 'hourly-usage-graph';
+
+      hourBuckets.forEach((bucket, hour) => {
+        const hourTotal = bucket.focused + bucket.distracted + bucket.neutral;
+        const bar = document.createElement('div');
+        bar.className = 'hourly-usage-bar';
+        const barHeight = hourTotal ? Math.max(10, (hourTotal / maxHourTotal) * 100) : 3;
+        bar.style.height = `${barHeight}%`;
+        bar.title = `${new Date(year, month - 1, day, hour).toLocaleTimeString('en-US', { hour: 'numeric' })}: ${formatTime(hourTotal)}`;
+
+        if (hourTotal > 0) {
+          const focusPct = (bucket.focused / hourTotal) * 100;
+          const distractedPct = (bucket.distracted / hourTotal) * 100;
+          bar.style.background = `linear-gradient(180deg, ${FOCUS_COLOR} 0 ${focusPct}%, ${DISTRACT_COLOR} ${focusPct}% ${focusPct + distractedPct}%, ${NEUTRAL_COLOR} ${focusPct + distractedPct}% 100%)`;
+          bar.classList.add('has-usage');
+        }
+
+        graphWrap.appendChild(bar);
+      });
+
+      const axis = document.createElement('div');
+      axis.className = 'hourly-usage-axis';
+      ['12AM', '6AM', '12PM', '6PM', '12AM'].forEach(label => {
+        const marker = document.createElement('span');
+        marker.textContent = label;
+        axis.appendChild(marker);
+      });
+
+      const summary = document.createElement('div');
+      summary.className = 'hourly-usage-summary';
+      const peakHour = hourBuckets.reduce((best, bucket, hour) => {
+        const total = bucket.focused + bucket.distracted + bucket.neutral;
+        const bestTotal = hourBuckets[best].focused + hourBuckets[best].distracted + hourBuckets[best].neutral;
+        return total > bestTotal ? hour : best;
+      }, 0);
+      const peakTotal = hourBuckets[peakHour].focused + hourBuckets[peakHour].distracted + hourBuckets[peakHour].neutral;
+      if (peakTotal > 0) {
+        const strong = document.createElement('strong');
+        strong.textContent = new Date(year, month - 1, day, peakHour).toLocaleTimeString('en-US', { hour: 'numeric' }).replace(' ', '');
+        summary.appendChild(document.createTextNode('Peak usage around '));
+        summary.appendChild(strong);
+        summary.appendChild(document.createTextNode(` with ${formatTime(peakTotal)} tracked.`));
+      } else {
+        summary.textContent = 'No hourly usage recorded yet.';
+      }
+
+      hourlyUsageGraph.append(graphWrap, axis, summary);
+    }
 
     const domainTotals = {};
     validSessions.forEach(session => {
@@ -1191,7 +1280,243 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ─── Domain List with Favicons, Avg Session, Labels ───
   // ─── Domain List with Favicons, Avg Session, Labels ───
-  function renderDomains(sessions) {
+  async function renderDomainSignals(container, sessions, sortedToday) {
+    container.textContent = '';
+
+    const totalToday = sessions.reduce((sum, session) => sum + (session.duration || 0), 0);
+    if (sessions.length === 0 || totalToday === 0) {
+      const emptyDiv = document.createElement('div');
+      emptyDiv.className = 'empty-state domain-signal-empty';
+      emptyDiv.textContent = 'Track a little activity to unlock domain signals.';
+      container.appendChild(emptyDiv);
+      return;
+    }
+
+    const selectedWeekKeys = getWeekDateKeysForDate(selectedDate);
+    const [year, month, day] = selectedDate.split('-').map(Number);
+    const previousWeekDate = new Date(year, month - 1, day);
+    previousWeekDate.setDate(previousWeekDate.getDate() - 7);
+    const previousWeekKey = `${previousWeekDate.getFullYear()}-${String(previousWeekDate.getMonth() + 1).padStart(2, '0')}-${String(previousWeekDate.getDate()).padStart(2, '0')}`;
+    const previousWeekKeys = getWeekDateKeysForDate(previousWeekKey);
+    const allWeekKeys = [...new Set([...selectedWeekKeys, ...previousWeekKeys])];
+    const weekData = await browser.storage.local.get(allWeekKeys);
+
+    const collectTotals = (keys) => {
+      const totals = {};
+      const daysActive = {};
+      keys.forEach((dateKey) => {
+        const dayData = weekData[dateKey] && Array.isArray(weekData[dateKey].sessions)
+          ? weekData[dateKey]
+          : { sessions: [] };
+        const dayDomains = new Set();
+        dayData.sessions.forEach((session) => {
+          if (!session.domain) return;
+          totals[session.domain] = (totals[session.domain] || 0) + (session.duration || 0);
+          dayDomains.add(session.domain);
+        });
+        dayDomains.forEach((domain) => {
+          daysActive[domain] = (daysActive[domain] || 0) + 1;
+        });
+      });
+      return { totals, daysActive };
+    };
+
+    const currentWeek = collectTotals(selectedWeekKeys);
+    const previousWeek = collectTotals(previousWeekKeys);
+    const weekTotal = Object.values(currentWeek.totals).reduce((sum, value) => sum + value, 0);
+    const previousTotal = Object.values(previousWeek.totals).reduce((sum, value) => sum + value, 0);
+    const weekDelta = weekTotal - previousTotal;
+    const weekDeltaText = previousTotal > 0
+      ? `${weekDelta >= 0 ? '+' : ''}${Math.round((weekDelta / previousTotal) * 100)}% vs last week`
+      : 'New week baseline';
+
+    const todayLeader = sortedToday[0] || null;
+    const todayLeaderShare = todayLeader ? Math.round((todayLeader[1] / totalToday) * 100) : 0;
+    const currentDomains = new Set(Object.keys(currentWeek.totals));
+    const previousDomains = new Set(Object.keys(previousWeek.totals));
+    const newDomains = [...currentDomains].filter(domain => !previousDomains.has(domain));
+    const risingDomain = Object.entries(currentWeek.totals)
+      .map(([domain, total]) => ({ domain, total, delta: total - (previousWeek.totals[domain] || 0) }))
+      .sort((a, b) => b.delta - a.delta)[0];
+    const consistentDomain = Object.entries(currentWeek.daysActive)
+      .sort((a, b) => b[1] - a[1] || (currentWeek.totals[b[0]] || 0) - (currentWeek.totals[a[0]] || 0))[0];
+
+    const categoryTotals = { focused: 0, distracted: 0, neutral: 0 };
+    sessions.forEach((session) => {
+      categoryTotals[classifySession(session)] += session.duration || 0;
+    });
+
+    const cards = [
+      {
+        label: 'Today leader',
+        value: todayLeader ? todayLeader[0] : 'None yet',
+        meta: todayLeader ? `${formatTime(todayLeader[1])} / ${todayLeaderShare}% of today` : 'No domain activity'
+      },
+      {
+        label: 'Week pace',
+        value: formatTime(weekTotal),
+        meta: weekDeltaText,
+        tone: weekDelta > 0 ? 'up' : (weekDelta < 0 ? 'down' : 'same')
+      },
+      {
+        label: newDomains.length ? 'New this week' : 'Fastest riser',
+        value: newDomains[0] || (risingDomain ? risingDomain.domain : 'None yet'),
+        meta: newDomains.length
+          ? `${newDomains.length} new domain${newDomains.length !== 1 ? 's' : ''} spotted`
+          : (risingDomain ? `${formatTime(Math.max(0, risingDomain.delta))} more than last week` : 'No change detected')
+      },
+      {
+        label: 'Most consistent',
+        value: consistentDomain ? consistentDomain[0] : 'None yet',
+        meta: consistentDomain ? `${consistentDomain[1]} active day${consistentDomain[1] !== 1 ? 's' : ''} this week` : 'Track more days'
+      }
+    ];
+
+    const grid = document.createElement('div');
+    grid.className = 'domain-signal-grid';
+    cards.forEach((item) => {
+      const card = document.createElement('div');
+      card.className = `domain-signal-card${item.tone ? ' ' + item.tone : ''}`;
+      const label = document.createElement('span');
+      label.className = 'domain-signal-label';
+      label.textContent = item.label;
+      const value = document.createElement('span');
+      value.className = 'domain-signal-value';
+      value.textContent = item.value;
+      value.title = item.value;
+      const meta = document.createElement('span');
+      meta.className = 'domain-signal-meta';
+      meta.textContent = item.meta;
+      card.append(label, value, meta);
+      grid.appendChild(card);
+    });
+
+    const mix = document.createElement('div');
+    mix.className = 'domain-focus-mix';
+    const mixHeader = document.createElement('div');
+    mixHeader.className = 'domain-focus-mix-header';
+    const mixTitle = document.createElement('span');
+    mixTitle.textContent = 'Today focus mix';
+    const mixTotal = document.createElement('span');
+    mixTotal.textContent = formatTime(totalToday);
+    mixHeader.append(mixTitle, mixTotal);
+
+    const mixBar = document.createElement('div');
+    mixBar.className = 'domain-focus-mix-bar';
+    [
+      ['focused', categoryTotals.focused, FOCUS_COLOR],
+      ['distracted', categoryTotals.distracted, DISTRACT_COLOR],
+      ['neutral', categoryTotals.neutral, NEUTRAL_COLOR]
+    ].forEach(([name, value, color]) => {
+      const segment = document.createElement('div');
+      segment.className = `domain-focus-segment ${name}`;
+      segment.style.width = `${Math.max(totalToday ? (value / totalToday) * 100 : 0, value > 0 ? 4 : 0)}%`;
+      segment.style.backgroundColor = color;
+      segment.title = `${name}: ${formatTime(value)}`;
+      mixBar.appendChild(segment);
+    });
+
+    const legend = document.createElement('div');
+    legend.className = 'domain-focus-legend';
+    [
+      ['Focused', categoryTotals.focused, FOCUS_COLOR],
+      ['Distracted', categoryTotals.distracted, DISTRACT_COLOR],
+      ['Neutral', categoryTotals.neutral, NEUTRAL_COLOR]
+    ].forEach(([name, value, color]) => {
+      const item = document.createElement('span');
+      const dot = document.createElement('i');
+      dot.style.backgroundColor = color;
+      item.append(dot, document.createTextNode(`${name} ${formatTime(value)}`));
+      legend.appendChild(item);
+    });
+
+    mix.append(mixHeader, mixBar, legend);
+    container.append(grid, mix);
+  }
+
+  async function renderAllTimeDomains() {
+    const container = document.getElementById('all-time-domain-list');
+    if (!container) return;
+
+    container.textContent = '';
+    const allData = await browser.storage.local.get(null);
+    const totals = {};
+    let grandTotal = 0;
+
+    Object.entries(allData).forEach(([dateKey, dayData]) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return;
+      const sessions = dayData && Array.isArray(dayData.sessions) ? dayData.sessions : [];
+      sessions.forEach((session) => {
+        if (!session.domain || !session.duration) return;
+        totals[session.domain] = (totals[session.domain] || 0) + session.duration;
+        grandTotal += session.duration;
+      });
+    });
+
+    const topDomains = Object.entries(totals)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10);
+
+    if (topDomains.length === 0) {
+      const emptyDiv = document.createElement('div');
+      emptyDiv.className = 'empty-state all-time-empty';
+      emptyDiv.textContent = 'No all-time website data yet.';
+      container.appendChild(emptyDiv);
+      return;
+    }
+
+    const maxDuration = topDomains[0][1] || 1;
+    const list = document.createElement('div');
+    list.className = 'all-time-domain-list';
+
+    topDomains.forEach(([domain, duration], index) => {
+      const row = document.createElement('div');
+      row.className = 'all-time-domain-row';
+
+      const rank = document.createElement('span');
+      rank.className = 'all-time-rank';
+      rank.textContent = String(index + 1);
+
+      const icon = document.createElement('img');
+      icon.className = 'all-time-favicon';
+      icon.src = `https://www.google.com/s2/favicons?domain=${domain}&sz=16`;
+      icon.onerror = () => {
+        icon.style.display = 'none';
+      };
+
+      const nameWrap = document.createElement('div');
+      nameWrap.className = 'all-time-domain-main';
+      const name = document.createElement('span');
+      name.className = 'all-time-domain-name';
+      name.textContent = domain;
+      name.title = domain;
+      const share = document.createElement('span');
+      share.className = 'all-time-domain-share';
+      share.textContent = `${Math.round((duration / Math.max(grandTotal, 1)) * 100)}% of tracked time`;
+      nameWrap.append(name, share);
+
+      const track = document.createElement('div');
+      track.className = 'all-time-track';
+      const fill = document.createElement('div');
+      fill.className = 'all-time-fill';
+      fill.style.backgroundColor = domainColor(domain);
+      setTimeout(() => {
+        fill.style.width = `${Math.max((duration / maxDuration) * 100, 2)}%`;
+      }, 20);
+      track.appendChild(fill);
+
+      const time = document.createElement('span');
+      time.className = 'all-time-duration';
+      time.textContent = formatTime(duration);
+
+      row.append(rank, icon, nameWrap, track, time);
+      list.appendChild(row);
+    });
+
+    container.appendChild(list);
+  }
+
+  async function renderDomains(sessions) {
     const domainTotals = {};
     const domainSessions = {};
 
@@ -1216,6 +1541,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       emptyDiv.appendChild(document.createElement('br'));
       emptyDiv.appendChild(document.createTextNode('Start browsing and come back!'));
       container.appendChild(emptyDiv);
+      const insightContainer = document.getElementById('domain-insights-panel');
+      if (insightContainer) {
+        renderDomainSignals(insightContainer, sessions, sorted).catch(console.error);
+      }
+      renderAllTimeDomains().catch(console.error);
       return;
     }
 
@@ -1263,8 +1593,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       const lDot = document.createElement('div');
       lDot.className = 'group-dot';
       lDot.style.backgroundColor = grp.color;
+      const groupTotal = grouped[grp.key].reduce((sum, item) => sum + item.duration, 0);
+      const labelText = document.createElement('span');
+      labelText.className = 'group-label-text';
+      labelText.textContent = grp.label;
+      const labelTime = document.createElement('span');
+      labelTime.className = 'group-label-time';
+      labelTime.textContent = formatTime(groupTotal);
       labelDiv.appendChild(lDot);
-      labelDiv.appendChild(document.createTextNode(' ' + grp.label));
+      labelDiv.append(labelText, labelTime);
       groupDiv.appendChild(labelDiv);
 
       grouped[grp.key].forEach(item => {
@@ -1312,36 +1649,27 @@ document.addEventListener('DOMContentLoaded', async () => {
       container.appendChild(groupDiv);
     });
 
-    // Populate dummy 7-DAY HISTORY
-    const histContainer = document.getElementById('domain-history-list');
-    if (histContainer) {
-      histContainer.textContent = '';
-      sorted.slice(0, 3).forEach(([dom, dur]) => {
-        const hRow = document.createElement('div');
-        hRow.className = 'history-row';
-
-        const hNameGrp = document.createElement('div');
-        hNameGrp.className = 'h-name-group';
-
-        const hImg = document.createElement('img');
-        hImg.className = 'd-dot';
-        hImg.src = `https://www.google.com/s2/favicons?domain=${dom}&sz=16`;
-        hImg.onerror = () => { hImg.style.display = 'none'; };
-
-        const hName = document.createElement('span');
-        hName.className = 'd-name';
-        hName.textContent = dom;
-
-        hNameGrp.append(hImg, hName);
-
-        const hDays = document.createElement('span');
-        hDays.className = 'h-days';
-        hDays.textContent = '7d';
-
-        hRow.append(hNameGrp, hDays);
-        histContainer.appendChild(hRow);
+    const insightContainer = document.getElementById('domain-insights-panel');
+    if (insightContainer) {
+      renderDomainSignals(insightContainer, sessions, sorted).catch((error) => {
+        console.error('Failed to render domain signals:', error);
+        insightContainer.textContent = '';
+        const emptyDiv = document.createElement('div');
+        emptyDiv.className = 'empty-state domain-signal-empty';
+        emptyDiv.textContent = 'Domain signals are unavailable right now.';
+        insightContainer.appendChild(emptyDiv);
       });
     }
+    renderAllTimeDomains().catch((error) => {
+      console.error('Failed to render all-time domains:', error);
+      const allTimeContainer = document.getElementById('all-time-domain-list');
+      if (!allTimeContainer) return;
+      allTimeContainer.textContent = '';
+      const emptyDiv = document.createElement('div');
+      emptyDiv.className = 'empty-state all-time-empty';
+      emptyDiv.textContent = 'All-time website data is unavailable right now.';
+      allTimeContainer.appendChild(emptyDiv);
+    });
 
     // Populate dummy DETAIL VIEW
     const detailContainer = document.getElementById('domain-detail-view');
@@ -1357,7 +1685,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  function showDomainDetail(topDom, currentLabel, topDur, sessionsCount) {
+  async function showDomainDetail(topDom, currentLabel, topDur, sessionsCount) {
     const detailContainer = document.getElementById('domain-detail-view');
     if (!detailContainer) return;
     
@@ -1366,6 +1694,21 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     let currentTag = productivityLabels[topDom] || 'untagged';
     if (currentTag === 'distraction') currentTag = 'distracting';
+    const weekKeys = getWeekDateKeysForDate(selectedDate);
+    const weekData = await browser.storage.local.get(weekKeys);
+    let weekTotal = 0;
+    let weekSessionsCount = 0;
+    weekKeys.forEach((dateKey) => {
+      const dayData = weekData[dateKey] && Array.isArray(weekData[dateKey].sessions)
+        ? weekData[dateKey]
+        : { sessions: [] };
+      dayData.sessions.forEach((session) => {
+        if (session.domain === topDom) {
+          weekTotal += session.duration || 0;
+          weekSessionsCount += 1;
+        }
+      });
+    });
 
     const todayDomainSessions = groupDomainDetailSessions(currentData.sessions, topDom);
     const sessFrag = document.createDocumentFragment();
@@ -1480,7 +1823,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       b.append(sl, sv);
       return b;
     };
-    statRow.append(mkSb('Today', formatTime(topDur)), mkSb('This week', formatTime(topDur * 5)), mkSb('Sessions', sessionsCount));
+    statRow.append(
+      mkSb('Today', formatTime(topDur)),
+      mkSb('This week', formatTime(weekTotal)),
+      mkSb('Week visits', weekSessionsCount)
+    );
 
     const sTitle = document.createElement('div');
     sTitle.className = 'detail-sessions-title';
@@ -1512,7 +1859,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         productivityLabels[topDom] = tag;
         await browser.storage.local.set({ productivityLabels });
         renderDomains(currentData.sessions);
-        showDomainDetail(topDom, currentLabel, topDur, sessionsCount);
+        await showDomainDetail(topDom, currentLabel, topDur, sessionsCount);
       });
     });
 
@@ -1525,7 +1872,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!targetGroup) return;
 
         targetGroup.sessions.forEach((groupedSession) => {
-          const mainIdx = currentData.sessions.findIndex(s => s === groupedSession);
+          const mainIdx = currentData.sessions.findIndex(s => (
+            s === groupedSession ||
+            (
+              s.domain === groupedSession.domain &&
+              s.start === groupedSession.start &&
+              s.end === groupedSession.end
+            )
+          ));
           if (mainIdx !== -1) {
             currentData.sessions[mainIdx].productivityLabel = newTag;
           }
@@ -1537,8 +1891,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         objToSave[selectedDate] = dataToSave;
         await browser.storage.local.set(objToSave);
 
+        const row = e.target.closest('.d-sess-row');
+        const fill = row ? row.querySelector('.d-fill') : null;
+        if (fill) {
+          let nextColor = 'var(--text-muted)';
+          if (newTag === 'productive') nextColor = 'var(--label-productive)';
+          if (newTag === 'distracting') nextColor = 'var(--label-distraction)';
+          fill.style.background = nextColor;
+        }
         renderDomains(currentData.sessions);
-        showDomainDetail(topDom, currentLabel, topDur, sessionsCount);
       });
     });
 
@@ -1562,6 +1923,36 @@ document.addEventListener('DOMContentLoaded', async () => {
     return palette[Math.abs(hash) % palette.length];
   }
 
+  function buildProjectSessionBlocks(sessions, projectName) {
+    const ordered = [...sessions]
+      .filter(session => session.start && session.end)
+      .sort((a, b) => a.start - b.start);
+    const blocks = [];
+    const gapMs = 3 * 60 * 1000;
+
+    ordered.forEach((session) => {
+      const last = blocks[blocks.length - 1];
+      if (!last || session.start - last.end > gapMs) {
+        blocks.push({
+          projectName,
+          start: session.start,
+          end: session.end,
+          duration: session.duration || 0,
+          domains: new Set([session.domain]),
+          sessionCount: 1
+        });
+        return;
+      }
+
+      last.end = Math.max(last.end, session.end);
+      last.duration += session.duration || 0;
+      last.domains.add(session.domain);
+      last.sessionCount += 1;
+    });
+
+    return blocks;
+  }
+
   // ─── Projects List ───
   async function renderProjects(sessions) {
     const allData = await browser.storage.local.get(null);
@@ -1575,7 +1966,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     Object.entries(projectsMap).forEach(([domain, pName]) => {
       if (pName !== 'Unassigned') {
         if (!projStats[pName]) {
-          projStats[pName] = { allTime: 0, thisWeek: 0, daysActive: new Set(), domains: new Set() };
+          projStats[pName] = { allTime: 0, thisWeek: 0, manualAllTime: 0, manualThisWeek: 0, daysActive: new Set(), manualDaysActive: new Set(), domains: new Set(), sessions: [] };
         }
         projStats[pName].domains.add(domain);
       }
@@ -1607,9 +1998,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       dayData.sessions.forEach(s => {
         if (!s.domain) return;
-        const pName = s.projectFocus || projectsMap[s.domain] || 'Unassigned';
+        const mappedProject = projectsMap[s.domain];
+        const manualProject = s.projectFocus;
+        const pName = manualProject || mappedProject || 'Unassigned';
         if (!projStats[pName]) {
-          projStats[pName] = { allTime: 0, thisWeek: 0, daysActive: new Set(), domains: new Set() };
+          projStats[pName] = { allTime: 0, thisWeek: 0, manualAllTime: 0, manualThisWeek: 0, daysActive: new Set(), manualDaysActive: new Set(), domains: new Set(), sessions: [] };
         }
         
         projStats[pName].allTime += s.duration;
@@ -1620,6 +2013,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
         projStats[pName].domains.add(s.domain);
         activeProjectsOnDay.add(pName);
+
+        if (manualProject) {
+          if (!projStats[manualProject]) {
+            projStats[manualProject] = { allTime: 0, thisWeek: 0, manualAllTime: 0, manualThisWeek: 0, daysActive: new Set(), manualDaysActive: new Set(), domains: new Set(), sessions: [] };
+          }
+          projStats[manualProject].manualAllTime += s.duration;
+          projStats[manualProject].manualDaysActive.add(dk);
+          projStats[manualProject].domains.add(s.domain);
+          if (isThisWeek) {
+            projStats[manualProject].manualThisWeek += s.duration;
+            projStats[manualProject].sessions.push({ ...s, dateKey: dk });
+          }
+        }
       });
       activeProjectsOnDay.forEach(pName => projStats[pName].daysActive.add(dk));
     });
@@ -1748,8 +2154,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             await browser.runtime.sendMessage({ action: 'syncProjectFocusBoundary' });
             renderProjects(currentData.sessions || []);
           });
+          const viewSessionsBtn = document.createElement('button');
+          viewSessionsBtn.className = 'proj-session-btn subtle';
+          const sessionBlocks = buildProjectSessionBlocks(stats.sessions, projName);
+          viewSessionsBtn.textContent = `Browse sessions (${sessionBlocks.length})`;
+          viewSessionsBtn.setAttribute('aria-expanded', 'false');
           const statPill = document.createElement('div'); statPill.className = `proj-status-pill ${statusClass}`; statPill.textContent = statusText;
-          headerActions.append(startBtn, statPill);
+          headerActions.append(startBtn, viewSessionsBtn, statPill);
           header.append(titleGrp, headerActions);
 
           // Stats
@@ -1763,6 +2174,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           };
           statsGrid.append(
             mkStatCol(formatTime(stats.thisWeek), 'This week'),
+            mkStatCol(formatTime(stats.manualThisWeek), 'Manual sessions'),
             mkStatCol(formatTime(stats.allTime), 'All time'),
             mkStatCol(stats.streak, 'Day streak')
           );
@@ -1843,7 +2255,56 @@ document.addEventListener('DOMContentLoaded', async () => {
           });
           dmsList.appendChild(dBtn);
 
-          pCard.append(header, statsGrid, progSect, dmsList);
+          const sessionsPanel = document.createElement('div');
+          sessionsPanel.className = 'project-sessions-panel';
+          sessionsPanel.hidden = true;
+          const sessionsTitle = document.createElement('div');
+          sessionsTitle.className = 'project-sessions-title';
+          sessionsTitle.textContent = 'Manual sessions this week';
+          const sessionsList = document.createElement('div');
+          sessionsList.className = 'project-sessions-list';
+          const visibleBlocks = [...sessionBlocks].sort((a, b) => b.start - a.start).slice(0, 20);
+          if (visibleBlocks.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'project-session-empty';
+            empty.textContent = 'No manual project sessions this week yet. Start a session on this project to make it appear here.';
+            sessionsList.appendChild(empty);
+          } else {
+            visibleBlocks.forEach((block, idx) => {
+              const row = document.createElement('div');
+              row.className = 'project-session-row';
+              const when = document.createElement('span');
+              when.className = 'project-session-when';
+              const startDate = new Date(block.start);
+              when.textContent = `${startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} ${startDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+              const sessionName = document.createElement('span');
+              sessionName.className = 'project-session-domain';
+              sessionName.textContent = `${projName} Session ${visibleBlocks.length - idx}`;
+              sessionName.title = Array.from(block.domains).join(', ');
+              const meta = document.createElement('span');
+              meta.className = 'project-session-meta';
+              const domains = Array.from(block.domains);
+              meta.textContent = `${block.sessionCount} site visit${block.sessionCount !== 1 ? 's' : ''} - ${domains.slice(0, 3).join(', ')}${domains.length > 3 ? ' +' + (domains.length - 3) : ''}`;
+              const duration = document.createElement('span');
+              duration.className = 'project-session-duration';
+              duration.textContent = formatTime(block.duration || 0);
+              const blockInfo = document.createElement('div');
+              blockInfo.className = 'project-session-info';
+              blockInfo.append(sessionName, meta);
+              row.append(when, blockInfo, duration);
+              sessionsList.appendChild(row);
+            });
+          }
+          sessionsPanel.append(sessionsTitle, sessionsList);
+          viewSessionsBtn.addEventListener('click', () => {
+            sessionsPanel.hidden = !sessionsPanel.hidden;
+            viewSessionsBtn.setAttribute('aria-expanded', String(!sessionsPanel.hidden));
+            viewSessionsBtn.textContent = sessionsPanel.hidden
+              ? `Browse sessions (${sessionBlocks.length})`
+              : 'Hide sessions';
+          });
+
+          pCard.append(header, statsGrid, progSect, dmsList, sessionsPanel);
 
           listContainer.appendChild(pCard);
 
@@ -2129,6 +2590,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     const quickChecksCount = recentSessions.filter(s => s.duration <= 3 * 60).length;
     const focusSharePct = totalRecentTime ? Math.round((focusedRecent / totalRecentTime) * 100) : 0;
     const distractionSharePct = totalRecentTime ? Math.round((distractedRecent / totalRecentTime) * 100) : 0;
+    const recentHourBuckets = new Array(24).fill(0);
+    recentSessions.forEach((session) => {
+      let cursor = new Date(session.start);
+      const endDate = new Date(session.end);
+      while (cursor < endDate) {
+        const hr = cursor.getHours();
+        const endOfHour = new Date(cursor);
+        endOfHour.setMinutes(59, 59, 999);
+        const sliceEnd = endOfHour < endDate ? endOfHour : endDate;
+        recentHourBuckets[hr] += Math.max(0, (sliceEnd - cursor) / 1000);
+        cursor = new Date(endOfHour.getTime() + 1);
+      }
+    });
+    let insightsPeakHour = 0;
+    for (let h = 1; h < 24; h++) {
+      if (recentHourBuckets[h] > recentHourBuckets[insightsPeakHour]) insightsPeakHour = h;
+    }
 
     const patternsGrid = document.getElementById('patterns-grid');
     if (patternsGrid) {
@@ -2184,8 +2662,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (recList) {
       recList.textContent = '';
       const recommendations = [];
-      if (switchCount > 0) {
-        const peakHourLabel = `${peakHour % 12 === 0 ? 12 : peakHour % 12}${peakHour >= 12 ? 'PM' : 'AM'}`;
+      if (switchCount > 0 && recentHourBuckets[insightsPeakHour] > 0) {
+        const peakHourLabel = `${insightsPeakHour % 12 === 0 ? 12 : insightsPeakHour % 12}${insightsPeakHour >= 12 ? 'PM' : 'AM'}`;
         recommendations.push(`Protect the hour around ${peakHourLabel}, since that is your strongest recurring work window.`);
       }
       if (quickChecksCount > longSessionsCount) {
@@ -2195,6 +2673,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         recommendations.push('Focused time is below half of your tracked time. Tagging a few high-value domains as productive will also sharpen the timeline and insights.');
       } else {
         recommendations.push('Your focused share is healthy. Try nudging one more session per day past 25 minutes to compound that progress.');
+      }
+      if (recommendations.length === 0) {
+        recommendations.push('Track a few more sessions to unlock tailored recommendations.');
       }
       recommendations.slice(0, 3).forEach(text => {
         const row = document.createElement('div');
@@ -2206,6 +2687,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const corrGrid = document.getElementById('correlations-grid');
     if (corrGrid) {
+      corrGrid.textContent = '';
       let morningTime = 0, afternoonTime = 0, eveningTime = 0, nightTime = 0;
       let longSessions = 0, shortSessions = 0;
       let dayTotals = [0,0,0,0,0,0,0]; 
@@ -2311,7 +2793,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       c4.append(c4Label, c4Val, c4Desc);
 
-      corrGrid.textContent = '';
       corrGrid.append(c1, c2, c3, c4);
     }
   }

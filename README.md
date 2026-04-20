@@ -285,6 +285,23 @@ Rationale:
 - preserves chronology
 - still communicates the category mix inside each hour
 
+#### Hour By Hour Usage Graph
+
+The Timeline tab also includes a dedicated hourly usage graph.
+
+What it shows:
+
+- 24 vertical bars, one for each hour of the selected day
+- bar height based on total tracked time in that hour
+- stacked color composition inside each bar using the same focused, distracted, and neutral palette
+- a short peak-hour summary below the graph
+
+Rationale:
+
+- makes daily rhythm easier to scan than a flat timeline alone
+- shows which hours carried the most browser activity
+- keeps category context visible without adding another dense table
+
 #### Top Domains Donut
 
 The donut chart shows:
@@ -397,19 +414,27 @@ Rationale:
 
 - the same domain can serve different roles on different sessions
 
+Each category header also shows the cumulative time for that category on the selected day, such as total productive time, neutral time, distracting time, or untagged time.
+
+Rationale:
+
+- lets the user understand each category’s total weight without manually adding individual domain rows
+
 #### Detail View
 
 Clicking a domain opens a detail surface with:
 
 - today’s total time
-- proxy weekly time
-- session count
+- the selected week’s actual total time for that domain
+- week visit count
 - domain-level default tag controls
 - per-session tag overrides
 
 Rationale:
 
 - lets the user correct classification at the right granularity
+- gives each domain a real day-vs-week comparison instead of a guessed weekly estimate
+- keeps per-session tag edits stable by saving them against the underlying session timestamps
 
 ## Projects Tab
 
@@ -474,6 +499,7 @@ Each project card shows:
 - weekly goal progress
 - attached domains
 - on-track or over-budget state
+- a collapsible this-week session list
 
 Rationale:
 
@@ -537,6 +563,28 @@ Important note:
 
 - the focus-mode timer is separate from the browser tab tracker
 - it represents intentional project focus state, not tab activity replacement
+
+#### Project Session List
+
+Each project card includes a compact `View sessions` control.
+
+When opened, it shows recent sessions from the current week that belong to that project, including:
+
+- date and start time
+- a named project block such as `Study Session 1`
+- a compact summary of the domains inside that block
+- duration
+
+Sessions count toward this list when:
+
+- the session was recorded while that project’s focus timer was active
+- the session’s domain is mapped to that project
+
+Rationale:
+
+- lets the user audit what actually contributed to a project total
+- presents project work as human-readable work blocks instead of raw individual website rows
+- keeps detailed rows hidden until the user asks for them
 
 ## Insights Tab
 
@@ -613,6 +661,7 @@ The correlations grid looks at:
 Rationale:
 
 - gives a broader behavioral fingerprint rather than a single-day snapshot
+- turns rolling history into interpretable patterns the user can act on
 
 ## Labels And Interpretation Logic
 
