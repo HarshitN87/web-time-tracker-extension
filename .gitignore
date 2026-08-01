@@ -1,0 +1,20 @@
+# Packaged builds — regenerate these from source, don't track them
+*.xpi
+*.zip
+
+# Local tool state
+.claude/settings.local.json
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# In case tooling is ever added
+node_modules/

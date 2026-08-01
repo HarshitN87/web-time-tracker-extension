@@ -1,994 +1,554 @@
 document.addEventListener('DOMContentLoaded', async () => {
-  // ─── Tab switching ───
-  const tabs = document.querySelectorAll('.tab');
-  const views = document.querySelectorAll('.view-content');
 
-  tabs.forEach(tab => {
-    tab.addEventListener('click', () => {
-      tabs.forEach(t => t.classList.remove('active'));
-      views.forEach(v => v.classList.remove('active'));
-      tab.classList.add('active');
-      document.getElementById(`view-${tab.dataset.view}`).classList.add('active');
-      if (tab.dataset.view === 'insights') renderInsights();
-    });
-  });
+  // ═══ Constants ═══
 
-  let currentData = { sessions: [] };
+  const VALID_LABELS = ['productive', 'neutral', 'distracting'];
+  const LABEL_NAMES = { productive: 'Productive', neutral: 'Neutral', distracting: 'Distracting' };
+  const STITCH_GAP_MS = 3 * 60 * 1000;
+  const BLOCK_GAP_MS = 3 * 60 * 1000;
+  const COMPACT_AFTER_DAYS = 90;
+
+  // Coverage below this and the split is more default than measurement, so it
+  // gets shown as provisional rather than asserted.
+  const CONFIDENCE_UNTAGGED_LIMIT = 0.4;
+
+  // Deviation detection — median and median-absolute-deviation, so "unusual" is
+  // measured against your own spread rather than a constant somebody picked.
+  const DEVIATION_MAD_THRESHOLD = 3;
+  const DEVIATION_MIN_DAYS = 7;
+  const DEVIATION_MIN_SECONDS = 15 * 60;
+  const DEVIATION_WINDOW_DAYS = 28;
+
+  const DAY_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const DAY_LONG = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+  const REFLECTION_QUESTIONS = [
+    'Which hour this week would you take back?',
+    'What did the time on your top site actually buy you?',
+    'Where did the week go differently from how you planned it?',
+    'What is one thing you want next week to look like instead?'
+  ];
+
+  // ═══ State ═══
+
+  let scope = { mode: 'day', anchor: todayKey() };
+  let sessions = [];          // stitched, scope-limited
+  let prevSessions = [];      // same length, immediately before
+  let scopeDayKeys = [];
+  let deviations = [];
+  let hasSynthetic = false;
+
+  let labelRules = {};
   let projectsMap = {};
   let projectGoals = {};
+  let projectMeta = {};
+  let plans = {};
+  let speedBumpSites = {};
   let activeProjectFocus = null;
-  let productivityLabels = {};
-  let energyTags = {};
-  let currentDomainFilter = 'all';
-  let currentDomainSort = 'time';
-  let trendMetric = 'time';
-  let heatmapWeekOffset = 0;
-  const FOCUS_COLOR = '#4A90E2';
-  const DISTRACT_COLOR = '#F97316';
-  const NEUTRAL_COLOR = '#7C3AED';
 
-  // Sort dropdown
-  const sortSelect = document.getElementById('domain-sort-select');
-  const heatmapPrevWeekBtn = document.getElementById('heatmap-prev-week');
-  const heatmapNextWeekBtn = document.getElementById('heatmap-next-week');
-  const heatmapRangeLabel = document.getElementById('heatmap-range-label');
-  if (sortSelect) {
-    sortSelect.addEventListener('change', (e) => {
-      currentDomainSort = e.target.value;
-      renderDomains(currentData.sessions);
-    });
-  }
-  if (heatmapPrevWeekBtn) {
-    heatmapPrevWeekBtn.addEventListener('click', () => {
-      heatmapWeekOffset += 1;
-      if (document.querySelector('.tab.active')?.dataset.view === 'insights') renderInsights();
-    });
-  }
-  if (heatmapNextWeekBtn) {
-    heatmapNextWeekBtn.addEventListener('click', () => {
-      if (heatmapWeekOffset === 0) return;
-      heatmapWeekOffset -= 1;
-      if (document.querySelector('.tab.active')?.dataset.view === 'insights') renderInsights();
-    });
-  }
-  document.querySelectorAll('.trend-toggle-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      trendMetric = btn.dataset.trendMetric || 'time';
-      document.querySelectorAll('.trend-toggle-btn').forEach(toggle => {
-        toggle.classList.toggle('active', toggle === btn);
-      });
-      renderWeeklyDigest();
-    });
-  });
+  let whereFilter = 'all';
+  let whereGroup = 'label';
+  let whereSort = 'time';
+  let openDetailDomain = null;
+  let reviewWeekOffset = 0;
+  let dayKeyCache = null;
 
-  // Fetch initial storage
-  const storageInit = await browser.storage.local.get(['projectMappings', 'projectGoals', 'activeProjectFocus', 'productivityLabels', 'energyTags', 'darkMode', 'themePrefs', 'notificationPrefs']);
-  projectsMap = storageInit.projectMappings || {};
-  projectGoals = storageInit.projectGoals || {};
-  activeProjectFocus = storageInit.activeProjectFocus || null;
-  productivityLabels = storageInit.productivityLabels || {};
-  energyTags = storageInit.energyTags || {};
+  let FOCUS_COLOR = '#4A6552';
+  let DISTRACT_COLOR = '#B03A2B';
+  let NEUTRAL_COLOR = '#9A9384';
+  let FAINT_COLOR = '#A9A294';
+  let SERIES_PALETTE = ['#4A6552', '#8C6A3F', '#5A6B7D', '#7A5468', '#6E7A4A', '#9A9384'];
 
-  // Apply Dark Mode if set
-  if (storageInit.darkMode || (storageInit.themePrefs && storageInit.themePrefs.darkMode)) {
-    document.documentElement.classList.add('dark-theme');
+  // ═══ Small utilities ═══
+
+  const $ = (id) => document.getElementById(id);
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
   }
 
-  // ─── Settings Modal ───
-  const settingsBtn = document.getElementById('settings-btn');
-  const settingsClose = document.getElementById('settings-close');
-  const settingsModal = document.getElementById('settings-modal');
-
-  settingsBtn.addEventListener('click', () => {
-    settingsModal.classList.add('open');
-    settingsModal.setAttribute('aria-hidden', 'false');
-  });
-
-  settingsClose.addEventListener('click', closeModal);
-  settingsModal.addEventListener('click', e => { if (e.target === settingsModal) closeModal(); });
-
-  function closeModal() {
-    settingsModal.classList.remove('open');
-    settingsModal.setAttribute('aria-hidden', 'true');
+  function clear(node) {
+    if (node) node.textContent = '';
   }
 
-  // ─── Settings Preferences ───
-  const darkModeToggle = document.getElementById('dark-mode-toggle');
-  const budgetAlertsToggle = document.getElementById('budget-alerts-toggle');
-  const dailySummaryToggle = document.getElementById('daily-summary-toggle');
-  const anomalyAlertsToggle = document.getElementById('anomaly-alerts-toggle');
-  const dailySummaryTimeInput = document.getElementById('daily-summary-time');
-  const clearDataBtn = document.getElementById('clear-data-btn');
-  const notificationPrefs = {
-    budgetAlerts: storageInit.notificationPrefs?.budgetAlerts ?? true,
-    dailySummary: storageInit.notificationPrefs?.dailySummary ?? true,
-    dailySummaryTime: storageInit.notificationPrefs?.dailySummaryTime || '18:00',
-    anomalyAlerts: storageInit.notificationPrefs?.anomalyAlerts ?? false
-  };
-
-  // Initialize toggle state from generic reading
-  if (document.documentElement.classList.contains('dark-theme')) {
-    if (darkModeToggle) darkModeToggle.checked = true;
-  }
-  if (budgetAlertsToggle) budgetAlertsToggle.checked = notificationPrefs.budgetAlerts;
-  if (dailySummaryToggle) dailySummaryToggle.checked = notificationPrefs.dailySummary;
-  if (anomalyAlertsToggle) anomalyAlertsToggle.checked = notificationPrefs.anomalyAlerts;
-  if (dailySummaryTimeInput) dailySummaryTimeInput.value = notificationPrefs.dailySummaryTime;
-
-  async function saveNotificationPrefs(nextPrefs = {}) {
-    Object.assign(notificationPrefs, nextPrefs);
-    await browser.storage.local.set({ notificationPrefs: { ...notificationPrefs } });
-    try {
-      await browser.runtime.sendMessage({ action: 'syncNotificationPrefs' });
-    } catch (error) {
-      console.warn('Failed to sync notification prefs:', error);
-    }
+  function isDayKey(key) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(key);
   }
 
-  if (darkModeToggle) {
-    darkModeToggle.addEventListener('change', async (e) => {
-      const isDark = e.target.checked;
-      if (isDark) {
-        document.documentElement.classList.add('dark-theme');
-      } else {
-        document.documentElement.classList.remove('dark-theme');
-      }
-      await browser.storage.local.set({ darkMode: isDark });
-    });
-  }
-  if (budgetAlertsToggle) {
-    budgetAlertsToggle.addEventListener('change', (e) => {
-      saveNotificationPrefs({ budgetAlerts: e.target.checked });
-    });
-  }
-  if (dailySummaryToggle) {
-    dailySummaryToggle.addEventListener('change', (e) => {
-      saveNotificationPrefs({ dailySummary: e.target.checked });
-    });
-  }
-  if (anomalyAlertsToggle) {
-    anomalyAlertsToggle.addEventListener('change', (e) => {
-      saveNotificationPrefs({ anomalyAlerts: e.target.checked });
-    });
-  }
-  if (dailySummaryTimeInput) {
-    dailySummaryTimeInput.addEventListener('change', (e) => {
-      saveNotificationPrefs({ dailySummaryTime: e.target.value || '18:00' });
-    });
+  function normalizeLabel(label) {
+    if (label === 'distraction') return 'distracting';
+    return VALID_LABELS.includes(label) ? label : null;
   }
 
-  function trgDL(content, filename, type) {
-    const blob = new Blob([content], { type });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+  function keyOf(date) {
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
   }
 
-  const btnExportJson = document.getElementById('btn-export-json');
-  if (btnExportJson) {
-    btnExportJson.addEventListener('click', async () => {
-      const allData = await browser.storage.local.get(null);
-      trgDL(JSON.stringify(allData, null, 2), `flow_tracker_export_${Date.now()}.json`, 'application/json');
-    });
+  function todayKey() {
+    return keyOf(new Date());
   }
 
-  const btnExportCsv = document.getElementById('btn-export-csv');
-  if (btnExportCsv) {
-    btnExportCsv.addEventListener('click', async () => {
-      const allData = await browser.storage.local.get(null);
-      let csvContent = "Date,Domain,Start,End,Duration (s),Label\n";
-      for (const [key, val] of Object.entries(allData)) {
-        if (key.match(/^\d{4}-\d{2}-\d{2}$/) && val.sessions) {
-          val.sessions.forEach(s => {
-            let label = s.productivityLabel;
-            if (label === undefined || label === '') {
-              label = productivityLabels[s.domain] || 'untagged';
-            }
-            csvContent += `${key},${s.domain},${s.start||''},${s.end||''},${s.duration},${label}\n`;
-          });
-        }
-      }
-      trgDL(csvContent, `flow_tracker_export_${Date.now()}.csv`, 'text/csv');
-    });
+  // `new Date('2026-08-01')` parses as UTC midnight, which lands on the previous
+  // day west of UTC. Day keys are always local dates, so parse them as such.
+  function parseKey(dateStr) {
+    const [year, month, day] = String(dateStr).split('-').map(Number);
+    return new Date(year, month - 1, day);
   }
 
-  if (clearDataBtn) {
-    clearDataBtn.addEventListener('click', async () => {
-      const range = document.getElementById('clear-data-range').value;
-      const rangeText = range === 'all' ? 'All time' : `the last ${range} days`;
-      
-      if (confirm(`Are you sure you want to clear tracking history for ${rangeText}? This cannot be undone.`)) {
-        if (range === 'all') {
-          // completely wipe the extension DB to Factory format
-          await browser.storage.local.clear();
-        } else {
-          // selective clear
-          const daysToClear = parseInt(range);
-          const allKeys = await browser.storage.local.get(null);
-          const keysToRemove = [];
-          const now = Date.now();
-          Object.keys(allKeys).forEach(k => {
-            if (k.match(/^\d{4}-\d{2}-\d{2}$/)) {
-              const d = new Date(k);
-              const diffDays = (now - d.getTime()) / (1000 * 3600 * 24);
-              if (diffDays <= daysToClear) keysToRemove.push(k);
-            }
-          });
-          await browser.storage.local.remove(keysToRemove);
-        }
-        alert('Data cleared successfully! The dashboard will now reload.');
-        location.reload();
-      }
-    });
+  function startOfDay(dateStr) {
+    return parseKey(dateStr).getTime();
   }
 
-  // ─── Domain Filters & Projects Actions ───
-  const filterPills = document.querySelectorAll('.filter-pill');
-  filterPills.forEach(pill => {
-    pill.addEventListener('click', () => {
-      filterPills.forEach(p => p.classList.remove('active'));
-      pill.classList.add('active');
-      currentDomainFilter = pill.textContent.trim().toLowerCase();
-      renderDomains(currentData.sessions);
-    });
-  });
-
-  const btnNewProject = document.querySelector('.show-new-project-btn');
-  const addProjectModal = document.getElementById('add-project-modal');
-  const addProjectClose = document.getElementById('add-project-close');
-  const btnSaveProject = document.getElementById('btn-save-project');
-  const inputProjName = document.getElementById('new-project-name');
-  const inputProjDomain = document.getElementById('new-project-domain');
-  const inputProjGoal = document.getElementById('new-project-goal');
-
-  if (btnNewProject && addProjectModal) {
-    btnNewProject.addEventListener('click', () => {
-      inputProjName.value = '';
-      inputProjDomain.value = '';
-      if (inputProjGoal) inputProjGoal.value = '';
-      addProjectModal.classList.add('open');
-      addProjectModal.setAttribute('aria-hidden', 'false');
-    });
-
-    addProjectClose.addEventListener('click', () => {
-      addProjectModal.classList.remove('open');
-      addProjectModal.setAttribute('aria-hidden', 'true');
-    });
-
-    addProjectModal.addEventListener('click', (e) => {
-      if (e.target === addProjectModal) {
-        addProjectModal.classList.remove('open');
-        addProjectModal.setAttribute('aria-hidden', 'true');
-      }
-    });
-
-    btnSaveProject.addEventListener('click', async () => {
-      const pName = inputProjName.value.trim();
-      const pDom = normalizeDomainInput(inputProjDomain.value);
-      const goalHours = inputProjGoal ? Number(inputProjGoal.value) : 0;
-      if (!pName || !pDom) {
-        alert("Please enter both a project name and a domain.");
-        return;
-      }
-
-      projectsMap[pDom] = pName;
-      if (goalHours > 0) {
-        projectGoals[pName] = Math.round(goalHours * 3600);
-      } else if (!projectGoals[pName]) {
-        projectGoals[pName] = 8 * 3600;
-      }
-      await browser.storage.local.set({ projectMappings: projectsMap, projectGoals });
-      
-      addProjectModal.classList.remove('open');
-      addProjectModal.setAttribute('aria-hidden', 'true');
-      
-      // Re-render UI
-      renderProjects(currentData.sessions || []);
-    });
+  function shiftKey(dateStr, days) {
+    const date = parseKey(dateStr);
+    date.setDate(date.getDate() + days);
+    return keyOf(date);
   }
 
-  // ─── Date helpers ───
-  function getTodayString() {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  }
-
-  let selectedDate = getTodayString();
-
-  const prevBtn = document.getElementById('prev-day');
-  const nextBtn = document.getElementById('next-day');
-  const dateLabel = document.getElementById('date-label');
-  const overviewHeading = document.getElementById('overview-heading');
-
-  function formatDateLabel(dateStr) {
-    const today = getTodayString();
-    if (dateStr === today) return 'Today';
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    const yStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`;
-    if (dateStr === yStr) return 'Yesterday';
-    const [year, month, day] = dateStr.split('-').map(Number);
-    const d = new Date(year, month - 1, day);
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  }
-
-  function updateDateUI() {
-    const today = getTodayString();
-    const label = formatDateLabel(selectedDate);
-    dateLabel.textContent = label;
-    nextBtn.disabled = (selectedDate === today);
-    overviewHeading.textContent = selectedDate === today
-      ? "TODAY'S OVERVIEW"
-      : `${label.toUpperCase()} OVERVIEW`;
-  }
-
-  function shiftDate(days) {
-    const [year, month, day] = selectedDate.split('-').map(Number);
-    const d = new Date(year, month - 1, day);
-    d.setDate(d.getDate() + days);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    if (d > today) return;
-    selectedDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    updateDateUI();
-    fetchDataForSelectedDate();
-  }
-
-  prevBtn.addEventListener('click', () => shiftDate(-1));
-  nextBtn.addEventListener('click', () => shiftDate(1));
-
-  function preprocessSessions(sessions) {
-    if (!sessions || sessions.length === 0) return [];
-    
-    const SESSION_STITCH_GAP_MS = 3 * 60 * 1000;
-    const valid = sessions.filter(s => s.start && s.end);
-    
-    if (valid.length === 0) return [];
-
-    valid.sort((a,b) => a.start - b.start);
-    const merged = [];
-    let current = { ...valid[0] };
-    for (let i = 1; i < valid.length; i++) {
-        const next = valid[i];
-        if (next.domain === current.domain && (next.start - current.end) < SESSION_STITCH_GAP_MS) {
-            current.end = next.end;
-            current.duration = Math.floor((current.end - current.start) / 1000);
-            if (next.productivityLabel && !current.productivityLabel) {
-                current.productivityLabel = next.productivityLabel;
-            }
-            if (next.projectFocus && !current.projectFocus) {
-                current.projectFocus = next.projectFocus;
-            }
-        } else {
-            merged.push(current);
-            current = { ...next };
-        }
-    }
-    merged.push(current);
-    
-    return merged;
-  }
-
-  function groupDomainDetailSessions(sessions, domain) {
-    const domainSessions = sessions
-      .filter(session => session.domain === domain && session.start && session.end)
-      .sort((a, b) => a.start - b.start);
-
-    if (domainSessions.length === 0) return [];
-
-    const grouped = [];
-    let current = {
-      start: domainSessions[0].start,
-      end: domainSessions[0].end,
-      duration: domainSessions[0].duration,
-      sessions: [domainSessions[0]]
-    };
-
-    for (let i = 1; i < domainSessions.length; i++) {
-      const next = domainSessions[i];
-      if ((next.start - current.end) < 3 * 60 * 1000) {
-        current.end = next.end;
-        current.duration += next.duration;
-        current.sessions.push(next);
-      } else {
-        grouped.push(current);
-        current = {
-          start: next.start,
-          end: next.end,
-          duration: next.duration,
-          sessions: [next]
-        };
-      }
-    }
-
-    grouped.push(current);
-    return grouped;
-  }
-
-  async function fetchDataForSelectedDate() {
-    try {
-      const raw = await browser.runtime.sendMessage({
-        action: selectedDate === getTodayString() ? 'getLatestData' : 'getDayData',
-        date: selectedDate
-      });
-      currentData = raw && Array.isArray(raw.sessions) ? raw : { sessions: [] };
-      currentData.sessions = preprocessSessions(currentData.sessions);
-      renderDashboard();
-    } catch (e) {
-      console.error("Error fetching data:", e);
-    }
+  function mondayOf(dateStr) {
+    const date = parseKey(dateStr);
+    const weekday = date.getDay();
+    date.setDate(date.getDate() - (weekday === 0 ? 6 : weekday - 1));
+    return keyOf(date);
   }
 
   function formatTime(seconds) {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
+    const total = Math.max(0, Math.round(seconds || 0));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
     if (h > 0) return `${h}h ${m}m`;
     if (m > 0) return `${m}m`;
-    return `< 1m`;
+    return total > 0 ? '< 1m' : '0m';
   }
 
-  function normalizeDomainInput(value) {
-    const raw = value.trim().toLowerCase();
-    if (!raw) return '';
-    try {
-      const withProto = raw.includes('://') ? raw : `https://${raw}`;
-      return new URL(withProto).hostname.replace(/^www\./, '');
-    } catch (e) {
-      return raw.replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
-    }
+  function formatHour(hour) {
+    const display = hour % 12 === 0 ? 12 : hour % 12;
+    return `${display}${hour >= 12 ? 'PM' : 'AM'}`;
   }
 
-  function classifySession(session) {
-    let label = session.productivityLabel || productivityLabels[session.domain] || 'neutral';
-    if (label === 'productive' || label === 'focused') return 'focused';
-    if (label === 'distracting' || label === 'distraction') return 'distracted';
-    return 'neutral';
+  function formatClockTime(timestamp) {
+    return new Date(timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
   }
 
-  function buildSessionGroups(validSessions) {
-    const groups = [];
-    let currentGrp = null;
-
-    validSessions.forEach(s => {
-      const classification = classifySession(s);
-      if (!currentGrp || (s.start - currentGrp.end > 3 * 60 * 1000)) {
-        currentGrp = {
-          id: `grp_${s.start}`,
-          start: s.start,
-          end: s.end,
-          duration: s.duration,
-          domains: [s.domain],
-          counts: { focused: classification === 'focused' ? s.duration : 0, distracted: classification === 'distracted' ? s.duration : 0, neutral: classification === 'neutral' ? s.duration : 0 },
-          switches: 0
-        };
-        groups.push(currentGrp);
-      } else {
-        if (currentGrp.domains[currentGrp.domains.length - 1] !== s.domain) currentGrp.switches++;
-        currentGrp.end = s.end;
-        currentGrp.duration += s.duration;
-        if (!currentGrp.domains.includes(s.domain)) currentGrp.domains.push(s.domain);
-        currentGrp.counts[classification] += s.duration;
-      }
-    });
-
-    return groups;
+  function pct(part, whole) {
+    return whole > 0 ? Math.round((part / whole) * 100) : 0;
   }
 
-  function getWeekDateKeys(offsetWeeks = 0) {
-    const base = new Date();
-    const day = base.getDay();
-    const mondayOffset = day === 0 ? 6 : day - 1;
-    base.setHours(0, 0, 0, 0);
-    base.setDate(base.getDate() - mondayOffset - (offsetWeeks * 7));
-    const keys = [];
-    for (let i = 0; i < 7; i++) {
-      const current = new Date(base);
-      current.setDate(base.getDate() + i);
-      keys.push(`${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, '0')}-${String(current.getDate()).padStart(2, '0')}`);
-    }
-    return keys;
+  function median(values) {
+    if (!values.length) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   }
 
-  function getWeekDateKeysForDate(dateStr) {
-    const [year, month, day] = dateStr.split('-').map(Number);
-    const base = new Date(year, month - 1, day);
-    const weekday = base.getDay();
-    const mondayOffset = weekday === 0 ? 6 : weekday - 1;
-    base.setHours(0, 0, 0, 0);
-    base.setDate(base.getDate() - mondayOffset);
-    const keys = [];
-    for (let i = 0; i < 7; i++) {
-      const current = new Date(base);
-      current.setDate(base.getDate() + i);
-      keys.push(`${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, '0')}-${String(current.getDate()).padStart(2, '0')}`);
-    }
-    return keys;
+  function medianAbsoluteDeviation(values, center) {
+    if (!values.length) return 0;
+    // 1.4826 rescales MAD to be comparable to a standard deviation for normal data.
+    return 1.4826 * median(values.map(value => Math.abs(value - center)));
   }
 
-  function formatHeatmapRangeLabel(weekKeys) {
-    if (!weekKeys || weekKeys.length === 0) return '';
-    const parseKey = (key) => {
-      const [year, month, day] = key.split('-').map(Number);
-      return new Date(year, month - 1, day);
-    };
-    const start = parseKey(weekKeys[0]);
-    const end = parseKey(weekKeys[6]);
-    const startText = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    const endText = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    return `${startText} - ${endText}`;
+  // MAD is exactly zero for a perfectly steady series — a site you open for the
+  // same ten minutes every day. That is the case where a spike is most obviously
+  // unusual, so flooring the spread keeps it detectable instead of dividing by
+  // zero and silently skipping it. The floor is relative to the median so it
+  // scales, with an absolute minimum so tiny habits do not fire on a stray minute.
+  function spreadOf(values, center) {
+    return Math.max(medianAbsoluteDeviation(values, center), center * 0.15, 60);
   }
 
-  function getProjectFocusElapsed() {
-    if (!activeProjectFocus || !activeProjectFocus.startTime) return 0;
-    return Math.max(0, Math.floor((Date.now() - activeProjectFocus.startTime) / 1000));
+  function readToken(name, fallback) {
+    const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return value || fallback;
   }
 
-  function updateProjectFocusClock() {
-    if (!activeProjectFocus) return;
-    const elapsed = formatTime(getProjectFocusElapsed());
-    const focusTitle = document.querySelector('[data-focus-mode-title]');
-    const focusDesc = document.querySelector('[data-focus-mode-desc]');
-    const activeBtn = document.querySelector('[data-project-focus-active="true"]');
-    if (focusTitle) focusTitle.textContent = activeProjectFocus.projectName;
-    if (focusDesc) {
-      focusDesc.textContent = `Running for ${elapsed}. Stay on the project and use the start button on any card to switch focus.`;
-    }
-    if (activeBtn) activeBtn.textContent = `Running ${elapsed}`;
+  function refreshThemeColors() {
+    FOCUS_COLOR = readToken('--good', FOCUS_COLOR);
+    DISTRACT_COLOR = readToken('--bad', DISTRACT_COLOR);
+    NEUTRAL_COLOR = readToken('--idle', NEUTRAL_COLOR);
+    FAINT_COLOR = readToken('--faint', FAINT_COLOR);
+    SERIES_PALETTE = [1, 2, 3, 4, 5, 6].map((i, idx) => readToken(`--series-${i}`, SERIES_PALETTE[idx]));
   }
 
-  // ─── Domain color palette ───
+  function labelColor(label) {
+    if (label === 'productive') return FOCUS_COLOR;
+    if (label === 'distracting') return DISTRACT_COLOR;
+    if (label === 'neutral') return NEUTRAL_COLOR;
+    return FAINT_COLOR;
+  }
+
+  // Stable per domain, but drawn from the theme's muted series rather than each
+  // site's brand colour — a page of logo colours reads as noise, not data.
   function domainColor(domain) {
-    const palette = ['#4FD1C5', '#84CC3E', '#EC4899', '#F59E0B', '#38BDF8', '#94A3B8'];
-    if (domain.includes('leetcode.com')) return '#FFA116';
-    if (domain.includes('x.com') || domain.includes('twitter.com')) return '#1DA1F2';
-    
     let hash = 0;
-    for (let i = 0; i < domain.length; i++) {
-      hash = domain.charCodeAt(i) + ((hash << 5) - hash);
+    const name = domain || '?';
+    for (let i = 0; i < name.length; i++) {
+      hash = name.charCodeAt(i) + ((hash << 5) - hash);
     }
-    return palette[Math.abs(hash) % palette.length];
+    return SERIES_PALETTE[Math.abs(hash) % SERIES_PALETTE.length];
   }
 
-  function renderDashboard() {
-    const sessions = currentData.sessions || [];
-    const totalSeconds = sessions.reduce((acc, s) => acc + s.duration, 0);
-    document.getElementById('total-time').textContent = formatTime(totalSeconds);
-
-    renderWeeklyDigest();
-    renderTimeline(sessions);
-    renderDomains(sessions);
-    renderProjects(sessions);
-
-    const activeTab = document.querySelector('.tab.active');
-    if (activeTab && activeTab.dataset.view === 'insights') {
-      renderInsights();
-    }
+  // Locally drawn monogram instead of a remote favicon service. Fetching favicons
+  // would hand the full list of browsed domains to a third party, which is exactly
+  // what this extension promises not to do.
+  function domainBadge(domain, size = 16) {
+    const badge = el('span', 'domain-badge', (domain || '?').replace(/^www\./, '').charAt(0).toUpperCase());
+    badge.style.setProperty('--badge-size', `${size}px`);
+    badge.style.backgroundColor = domainColor(domain || '?');
+    badge.setAttribute('aria-hidden', 'true');
+    return badge;
   }
 
-  // ─── Weekly Digest ───
-  async function renderWeeklyDigest() {
-    const isVisitMetric = trendMetric === 'visits';
-    const formatDigestMetric = (value) => isVisitMetric
-      ? `${value} visit${value === 1 ? '' : 's'}`
-      : formatTime(value);
-    const today = new Date();
-    const todayStr = getTodayString();
-    const dayOfWeek = today.getDay(); // 0=Sun
-
-    // Build this week (Mon–Sun) and last week date keys
-    // Find most recent Monday
-    const mondayOffset = (dayOfWeek === 0 ? 6 : dayOfWeek - 1);
-    const thisMonday = new Date(today);
-    thisMonday.setDate(today.getDate() - mondayOffset);
-    thisMonday.setHours(0, 0, 0, 0);
-
-    const lastMonday = new Date(thisMonday);
-    lastMonday.setDate(thisMonday.getDate() - 7);
-
-    function dateStr(d) {
-      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    }
-
-    const thisWeekKeys = [];
-    const lastWeekKeys = [];
-    const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    const fullDayNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-
-    for (let i = 0; i < 7; i++) {
-      const d1 = new Date(thisMonday);
-      d1.setDate(thisMonday.getDate() + i);
-      thisWeekKeys.push(dateStr(d1));
-
-      const d2 = new Date(lastMonday);
-      d2.setDate(lastMonday.getDate() + i);
-      lastWeekKeys.push(dateStr(d2));
-    }
-
-    const allKeys = [...thisWeekKeys, ...lastWeekKeys];
-    const allData = await browser.storage.local.get(allKeys);
-
-    // Compute per-day totals
-    function dayTotal(key) {
-      const dd = allData[key] && Array.isArray(allData[key].sessions) ? allData[key] : { sessions: [] };
-      return isVisitMetric
-        ? dd.sessions.length
-        : dd.sessions.reduce((a, s) => a + s.duration, 0);
-    }
-
-    const thisWeekTotals = thisWeekKeys.map(dayTotal);
-    const lastWeekTotals = lastWeekKeys.map(dayTotal);
-
-    const thisWeekSum = thisWeekTotals.reduce((a, b) => a + b, 0);
-    const lastWeekSum = lastWeekTotals.reduce((a, b) => a + b, 0);
-
-    const thisActiveDays = thisWeekTotals.filter(t => t > 0).length;
-    const lastActiveDays = lastWeekTotals.filter(t => t > 0).length;
-
-    const thisAvg = thisActiveDays > 0 ? Math.round(thisWeekSum / 7) : 0;
-    const lastAvg = lastActiveDays > 0 ? Math.round(lastWeekSum / 7) : 0;
-
-    let peakIdx = 0;
-    for (let i = 1; i < 7; i++) {
-      if (thisWeekTotals[i] > thisWeekTotals[peakIdx]) peakIdx = i;
-    }
-
-    // Header
-    const rangeStart = thisMonday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    const sundayDate = new Date(thisMonday);
-    sundayDate.setDate(thisMonday.getDate() + 6);
-    const rangeEnd = sundayDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-    document.getElementById('digest-range').textContent = `${rangeStart} – ${rangeEnd}`;
-    const totalLabel = document.getElementById('digest-total-label');
-    const avgLabel = document.getElementById('digest-avg-label');
-    if (totalLabel) totalLabel.textContent = isVisitMetric ? 'Total visits' : 'Total time';
-    if (avgLabel) avgLabel.textContent = isVisitMetric ? 'Daily visits' : 'Daily avg';
-
-    // Badge
-    const badge = document.getElementById('digest-badge');
-    badge.className = 'digest-badge';
-    if (lastWeekSum === 0) {
-      badge.classList.add('same');
-      badge.textContent = 'first week';
-    } else {
-      const weekDiff = thisWeekSum - lastWeekSum;
-      const weekPct = Math.round(Math.abs(weekDiff / lastWeekSum) * 100);
-      if (weekDiff > 0) {
-        badge.classList.add('up');
-        badge.textContent = `↑ ${weekPct}% vs last week`;
-      } else if (weekDiff < 0) {
-        badge.classList.add('down');
-        badge.textContent = `↓ ${weekPct}% vs last week`;
-      } else {
-        badge.classList.add('same');
-        badge.textContent = 'same as last week';
-      }
-    }
-
-    // Stats
-    function setDelta(el, current, previous, isFmt) {
-      el.className = 'digest-stat-delta';
-      const diff = current - previous;
-      if (diff > 0) {
-        el.classList.add('up');
-        el.textContent = `↑ ${isFmt ? formatDigestMetric(diff) : diff}`;
-      } else if (diff < 0) {
-        el.classList.add('down');
-        el.textContent = `↓ ${isFmt ? formatDigestMetric(Math.abs(diff)) : Math.abs(diff)}`;
-      } else {
-        el.classList.add('same');
-        el.textContent = 'same';
-      }
-    }
-
-    document.getElementById('digest-total').textContent = formatDigestMetric(thisWeekSum);
-    setDelta(document.getElementById('digest-total-delta'), thisWeekSum, lastWeekSum, true);
-
-    document.getElementById('digest-avg').textContent = formatDigestMetric(thisAvg);
-    setDelta(document.getElementById('digest-avg-delta'), thisAvg, lastAvg, true);
-
-    document.getElementById('digest-active-days').textContent = `${thisActiveDays} / 7`;
-    setDelta(document.getElementById('digest-active-delta'), thisActiveDays, lastActiveDays, false);
-
-    document.getElementById('digest-peak-day').textContent = thisWeekTotals[peakIdx] > 0 ? fullDayNames[peakIdx] : '—';
-    document.getElementById('digest-peak-time').textContent = thisWeekTotals[peakIdx] > 0 ? formatDigestMetric(thisWeekTotals[peakIdx]) : '';
-    document.getElementById('digest-peak-time').className = 'digest-stat-delta';
-
-    // Day by Day
-    const dayByDay = document.getElementById('day-by-day');
-    dayByDay.textContent = '';
-    const maxDay = Math.max(...thisWeekTotals, 1);
-    const todayIdx = mondayOffset; // 0=Mon, 6=Sun
-
-    for (let i = 0; i < 7; i++) {
-      const row = document.createElement('div');
-      row.className = 'day-row';
-
-      const isToday = (i === todayIdx);
-      const isFuture = thisWeekKeys[i] > todayStr;
-
-      const label = document.createElement('div');
-      label.className = `day-label${isToday ? ' is-today' : ''}`;
-      label.textContent = dayLabels[i];
-      row.appendChild(label);
-
-      const track = document.createElement('div');
-      track.className = 'day-bar-track';
-
-      const fill = document.createElement('div');
-      fill.className = `day-bar-fill${isToday ? ' today' : ''}`;
-      const barPct = thisWeekTotals[i] > 0 ? (thisWeekTotals[i] / maxDay) * 100 : 0;
-      setTimeout(() => { fill.style.width = `${barPct}%`; }, 20);
-
-      if (isToday && thisWeekTotals[i] > 0) {
-        const barText = document.createElement('span');
-        barText.className = 'day-bar-text';
-        barText.textContent = 'today';
-        fill.appendChild(barText);
-      }
-
-      track.appendChild(fill);
-      row.appendChild(track);
-
-      const timeEl = document.createElement('div');
-      timeEl.className = `day-time${isToday ? ' is-today' : ''}`;
-      timeEl.textContent = thisWeekTotals[i] > 0 ? formatDigestMetric(thisWeekTotals[i]) : (isFuture ? '' : '—');
-      row.appendChild(timeEl);
-
-      dayByDay.appendChild(row);
-    }
-
-    // Top Domains This Week
-    const domainContainer = document.getElementById('digest-domains');
-    domainContainer.textContent = '';
-
-    const thisWeekDomains = {};
-    const lastWeekDomains = {};
-
-    thisWeekKeys.forEach(k => {
-      const dd = allData[k] && Array.isArray(allData[k].sessions) ? allData[k] : { sessions: [] };
-      dd.sessions.forEach(s => { thisWeekDomains[s.domain] = (thisWeekDomains[s.domain] || 0) + (isVisitMetric ? 1 : s.duration); });
-    });
-    lastWeekKeys.forEach(k => {
-      const dd = allData[k] && Array.isArray(allData[k].sessions) ? allData[k] : { sessions: [] };
-      dd.sessions.forEach(s => { lastWeekDomains[s.domain] = (lastWeekDomains[s.domain] || 0) + (isVisitMetric ? 1 : s.duration); });
-    });
-
-    const sortedDomains = Object.entries(thisWeekDomains).sort((a, b) => b[1] - a[1]).slice(0, 5);
-    const domainMax = sortedDomains.length > 0 ? sortedDomains[0][1] : 1;
-
-    sortedDomains.forEach(([domain, dur], idx) => {
-      const row = document.createElement('div');
-      row.className = 'digest-domain-row';
-
-      const rank = document.createElement('span');
-      rank.className = 'digest-domain-rank';
-      rank.textContent = idx + 1;
-      row.appendChild(rank);
-
-      const dot = document.createElement('div');
-      dot.className = 'digest-domain-dot';
-      dot.style.backgroundColor = domainColor(domain);
-      row.appendChild(dot);
-
-      const name = document.createElement('span');
-      name.className = 'digest-domain-name';
-      name.textContent = domain;
-      row.appendChild(name);
-
-      const barTrack = document.createElement('div');
-      barTrack.className = 'digest-domain-bar-track';
-      const barFill = document.createElement('div');
-      barFill.className = 'digest-domain-bar-fill';
-      barFill.style.backgroundColor = domainColor(domain);
-      setTimeout(() => { barFill.style.width = `${(dur / domainMax) * 100}%`; }, 20);
-      barTrack.appendChild(barFill);
-      row.appendChild(barTrack);
-
-      const time = document.createElement('span');
-      time.className = 'digest-domain-time';
-      time.textContent = formatDigestMetric(dur);
-      row.appendChild(time);
-
-      const delta = document.createElement('span');
-      delta.className = 'digest-domain-delta';
-      const prevDur = lastWeekDomains[domain] || 0;
-      if (prevDur === 0) {
-        delta.classList.add('up');
-        delta.textContent = '↑ new';
-      } else {
-        const diff = dur - prevDur;
-        if (diff > 0) {
-          delta.classList.add('up');
-          delta.textContent = `↑ ${formatDigestMetric(diff)}`;
-        } else if (diff < 0) {
-          delta.classList.add('down');
-          delta.textContent = `↓ ${formatDigestMetric(Math.abs(diff))}`;
-        } else {
-          delta.classList.add('same');
-          delta.textContent = '—';
-        }
-      }
-      row.appendChild(delta);
-
-      domainContainer.appendChild(row);
-    });
-
-    if (sortedDomains.length === 0) {
-      domainContainer.textContent = '';
-      const emptyDiv = document.createElement('div');
-      emptyDiv.className = 'empty-state';
-      emptyDiv.textContent = 'No domains tracked this week.';
-      domainContainer.appendChild(emptyDiv);
-    }
-
-    // Highlights
-    // Longest session
-    let longestSess = 0, longestDomain = '', longestDay = '';
-    thisWeekKeys.forEach((k, i) => {
-      const dd = allData[k] && Array.isArray(allData[k].sessions) ? allData[k] : { sessions: [] };
-      dd.sessions.forEach(s => {
-        if (s.duration > longestSess) {
-          longestSess = s.duration;
-          longestDomain = s.domain;
-          longestDay = dayLabels[i];
-        }
-      });
-    });
-    document.getElementById('hl-longest-val').textContent = longestSess > 0 ? `${Math.round(longestSess / 60)} min` : '—';
-    document.getElementById('hl-longest-sub').textContent = longestSess > 0 ? `${longestDay}, ${longestDomain}` : '';
-
-    // Peak hour
-    const hourBuckets = new Array(24).fill(0);
-    const hourDays = new Array(24).fill(0).map(() => new Set());
-    thisWeekKeys.forEach((k, dayI) => {
-      const dd = allData[k] && Array.isArray(allData[k].sessions) ? allData[k] : { sessions: [] };
-      dd.sessions.forEach(s => {
-        if (!s.start || !s.end) return;
-        let cursor = new Date(s.start);
-        const endDate = new Date(s.end);
-        while (cursor < endDate) {
-          const hr = cursor.getHours();
-          const endOfHour = new Date(cursor);
-          endOfHour.setMinutes(59, 59, 999);
-          const sliceEnd = endOfHour < endDate ? endOfHour : endDate;
-          hourBuckets[hr] += Math.max(0, (sliceEnd - cursor) / 1000);
-          hourDays[hr].add(dayI);
-          cursor = new Date(endOfHour.getTime() + 1);
-        }
-      });
-    });
-    let peakHour = 0;
-    for (let h = 1; h < 24; h++) { if (hourBuckets[h] > hourBuckets[peakHour]) peakHour = h; }
-    const peakAmpm = peakHour >= 12 ? 'PM' : 'AM';
-    const peakH = peakHour % 12 === 0 ? 12 : peakHour % 12;
-    const nextH = (peakHour + 1) % 12 === 0 ? 12 : (peakHour + 1) % 12;
-    const nextAmpm = (peakHour + 1) >= 12 ? 'PM' : 'AM';
-    document.getElementById('hl-peak-val').textContent = hourBuckets[peakHour] > 0 ? `${peakH} – ${nextH} ${nextAmpm}` : '—';
-    document.getElementById('hl-peak-sub').textContent = hourBuckets[peakHour] > 0 ? `across ${hourDays[peakHour].size} of ${thisActiveDays} days` : '';
-
-    // New this week
-    const newDomains = Object.keys(thisWeekDomains).filter(d => !(d in lastWeekDomains));
-    if (newDomains.length > 0) {
-      document.getElementById('hl-new-val').textContent = newDomains[0];
-      document.getElementById('hl-new-sub').textContent = 'first visit';
-    } else {
-      document.getElementById('hl-new-val').textContent = '—';
-      document.getElementById('hl-new-sub').textContent = 'no new domains';
-    }
-
-    // Dropped off
-    const droppedDomains = Object.entries(lastWeekDomains)
-      .filter(([d]) => !(d in thisWeekDomains) || thisWeekDomains[d] < lastWeekDomains[d] * 0.5)
-      .sort((a, b) => b[1] - a[1]);
-    if (droppedDomains.length > 0) {
-      const [dd, prevTime] = droppedDomains[0];
-      const nowTime = thisWeekDomains[dd] || 0;
-      const dropPct = Math.round(((prevTime - nowTime) / prevTime) * 100);
-      document.getElementById('hl-dropped-val').textContent = dd;
-      document.getElementById('hl-dropped-sub').textContent = `↓ ${dropPct}% vs last week`;
-    } else {
-      document.getElementById('hl-dropped-val').textContent = '—';
-      document.getElementById('hl-dropped-sub').textContent = 'none dropped';
-    }
-
-    // Streak
-    const streakSection = document.getElementById('streak-section');
-    streakSection.textContent = '';
-
-    // Count consecutive active days ending today
-    let streakCount = 0;
-    for (let i = todayIdx; i >= 0; i--) {
-      if (thisWeekTotals[i] > 0) streakCount++;
-      else break;
-    }
-
-    const streakLabel = document.createElement('div');
-    streakLabel.className = 'streak-label';
-    streakLabel.textContent = `Active day streak — ${streakCount} day${streakCount !== 1 ? 's' : ''}`;
-    streakSection.appendChild(streakLabel);
-
-    const dotsRow = document.createElement('div');
-    dotsRow.className = 'streak-dots';
-    for (let i = 0; i < 7; i++) {
-      const dot = document.createElement('div');
-      dot.className = `streak-dot ${thisWeekTotals[i] > 0 ? 'active' : 'inactive'}`;
-      dot.textContent = dayLabels[i].charAt(0);
-      dotsRow.appendChild(dot);
-    }
-    streakSection.appendChild(dotsRow);
+  function emptyState(message) {
+    return el('div', 'empty-state', message);
   }
 
-  // ─── Structured Timeline ───
-  function renderTimeline(sessions) {
-    const timelineBar = document.getElementById('timeline-container');
-    const timelineMarkers = document.getElementById('timeline-legend');
-    const distributionSummary = document.getElementById('distribution-summary');
-    const pieWrap = document.getElementById('domain-pie-wrap');
-    const switchBar = document.getElementById('switch-bar');
-    const switchStats = document.getElementById('switch-stats');
-    const sessionCards = document.getElementById('session-breakdown');
-    const hourlyUsageGraph = document.getElementById('hourly-usage-graph');
+  // ═══ Label rules ═══
+  //
+  // Mirrors the resolver in background.js. A label is not a property of a
+  // domain — youtube.com is research during a thesis session and a sink at
+  // midnight — so a rule carries a condition and the first match wins.
 
-    [timelineBar, timelineMarkers, distributionSummary, pieWrap, switchBar, switchStats, sessionCards, hourlyUsageGraph].forEach(el => {
-      if (el) el.textContent = '';
-    });
+  function hourInWindow(hour, fromHour, toHour) {
+    if (fromHour === toHour) return true;
+    // A window like 22 -> 6 wraps past midnight.
+    return fromHour < toHour
+      ? hour >= fromHour && hour < toHour
+      : hour >= fromHour || hour < toHour;
+  }
 
-    const validSessions = sessions.filter(s => s.start && s.end).sort((a, b) => a.start - b.start);
-    if (validSessions.length === 0) {
-      [timelineBar, pieWrap, switchBar, sessionCards, hourlyUsageGraph].forEach(el => {
-        if (!el) return;
-        const emptyDiv = document.createElement('div');
-        emptyDiv.className = 'empty-state';
-        emptyDiv.textContent = 'No activity tracked for this day yet.';
-        el.appendChild(emptyDiv);
-      });
-      return;
+  function ruleMatches(rule, context) {
+    const when = rule.when || {};
+    if (when.project && when.project !== context.project) return false;
+    // Path conditions are evaluated live at capture time; a stored session keeps
+    // only its domain, so they cannot be re-checked here.
+    if (when.path && !context.path) return false;
+    if (when.path && !context.path.startsWith(when.path)) return false;
+    if (typeof when.fromHour === 'number' && typeof when.toHour === 'number') {
+      if (!hourInWindow(new Date(context.at).getHours(), when.fromHour, when.toHour)) return false;
+    }
+    return true;
+  }
+
+  function ruleIsConditional(rule) {
+    const when = rule.when || {};
+    return Boolean(when.project || when.path || typeof when.fromHour === 'number');
+  }
+
+  function describeRule(rule) {
+    const when = rule.when || {};
+    const parts = [];
+    if (when.project) parts.push(`during ${when.project}`);
+    if (typeof when.fromHour === 'number') parts.push(`between ${formatHour(when.fromHour)} and ${formatHour(when.toHour)}`);
+    if (when.path) parts.push(`on paths starting ${when.path}`);
+    return parts.length ? parts.join(', ') : 'by default';
+  }
+
+  // Returns null for untagged rather than falling back to neutral. Untagged time
+  // is a gap in the data, and reporting it as neutral tells a user who has never
+  // tagged anything that their time is 100% neutral.
+  function labelOf(session) {
+    const explicit = normalizeLabel(session.productivityLabel);
+    if (explicit) return explicit;
+
+    const rules = labelRules[session.domain] || [];
+    const context = { at: session.start, project: session.projectFocus || null, path: null };
+    for (const rule of rules) {
+      if (ruleMatches(rule, context)) return normalizeLabel(rule.label);
+    }
+    return null;
+  }
+
+  async function saveLabelRules() {
+    await browser.storage.local.set({ labelRules });
+  }
+
+  // ═══ Scope ═══
+
+  function scopeKeys() {
+    if (scope.mode === 'day') return [scope.anchor];
+
+    if (scope.mode === 'week') {
+      const monday = mondayOf(scope.anchor);
+      return Array.from({ length: 7 }, (_, i) => shiftKey(monday, i));
     }
 
-    const groups = buildSessionGroups(validSessions);
-    const [year, month, day] = selectedDate.split('-').map(Number);
+    if (scope.mode === 'month') {
+      const date = parseKey(scope.anchor);
+      const days = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+      return Array.from({ length: days }, (_, i) => keyOf(new Date(date.getFullYear(), date.getMonth(), i + 1)));
+    }
 
-    const categoryTotals = { focused: 0, distracted: 0, neutral: 0 };
-    validSessions.forEach(session => {
-      categoryTotals[classifySession(session)] += session.duration;
+    return dayKeyCache || [];
+  }
+
+  function previousScopeKeys() {
+    const keys = scopeKeys();
+    if (!keys.length || scope.mode === 'all') return [];
+    const firstStart = startOfDay(keys[0]);
+    return keys.map((_, index) => {
+      const date = new Date(firstStart);
+      date.setDate(date.getDate() - keys.length + index);
+      return keyOf(date);
     });
-    const totalSeconds = validSessions.reduce((sum, session) => sum + session.duration, 0) || 1;
-    [
-      ['Focus', categoryTotals.focused, FOCUS_COLOR],
-      ['Distracted', categoryTotals.distracted, DISTRACT_COLOR],
-      ['Neutral', categoryTotals.neutral, NEUTRAL_COLOR]
-    ].forEach(([label, duration, color]) => {
-      const row = document.createElement('div');
-      row.className = 'distribution-row';
-      const pct = Math.round((duration / totalSeconds) * 100);
-      const dot = document.createElement('span');
-      dot.className = 'chart-dot';
-      dot.style.color = color;
-      dot.style.background = color;
-      const name = document.createElement('span');
-      name.className = 'chart-name';
-      name.textContent = label;
-      const track = document.createElement('div');
-      track.className = 'distribution-track';
-      const fill = document.createElement('div');
-      fill.className = 'distribution-fill';
-      fill.style.width = `${pct}%`;
-      fill.style.background = color;
-      track.appendChild(fill);
-      const time = document.createElement('span');
-      time.className = 'chart-time';
-      time.textContent = formatTime(duration);
-      row.append(dot, name, track, time);
-      distributionSummary.appendChild(row);
+  }
+
+  function scopeLabel() {
+    const keys = scopeKeys();
+    if (scope.mode === 'all') return 'All time';
+
+    if (scope.mode === 'day') {
+      if (scope.anchor === todayKey()) return 'Today';
+      if (scope.anchor === shiftKey(todayKey(), -1)) return 'Yesterday';
+      return parseKey(scope.anchor).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+
+    if (scope.mode === 'week') {
+      if (keys[0] === mondayOf(todayKey())) return 'This week';
+      const start = parseKey(keys[0]).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      const end = parseKey(keys[6]).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      return `${start} – ${end}`;
+    }
+
+    const date = parseKey(scope.anchor);
+    const now = new Date();
+    if (date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth()) return 'This month';
+    return date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  }
+
+  function atLatestScope() {
+    if (scope.mode === 'all') return true;
+    const today = todayKey();
+    if (scope.mode === 'day') return scope.anchor === today;
+    if (scope.mode === 'week') return mondayOf(scope.anchor) === mondayOf(today);
+    const anchor = parseKey(scope.anchor);
+    const now = new Date();
+    return anchor.getFullYear() === now.getFullYear() && anchor.getMonth() === now.getMonth();
+  }
+
+  function shiftScope(direction) {
+    if (scope.mode === 'all') return;
+    if (direction > 0 && atLatestScope()) return;
+
+    if (scope.mode === 'day') {
+      scope.anchor = shiftKey(scope.anchor, direction);
+    } else if (scope.mode === 'week') {
+      scope.anchor = shiftKey(mondayOf(scope.anchor), direction * 7);
+    } else {
+      const date = parseKey(scope.anchor);
+      date.setDate(1);
+      date.setMonth(date.getMonth() + direction);
+      scope.anchor = keyOf(date);
+    }
+
+    if (parseKey(scope.anchor) > new Date()) scope.anchor = todayKey();
+    loadAndRender();
+  }
+
+  function setScopeMode(mode) {
+    if (scope.mode === mode) return;
+    scope.mode = mode;
+    scope.anchor = todayKey();
+    document.querySelectorAll('.scope-mode').forEach((button) => {
+      button.classList.toggle('active', button.dataset.scopeMode === mode);
+    });
+    loadAndRender();
+  }
+
+  // ═══ Data ═══
+
+  // Cached so that filtering, sorting and regrouping never touch storage. The
+  // previous build re-read the entire history on every filter-pill click.
+  async function listDayKeys() {
+    if (dayKeyCache) return dayKeyCache;
+    const all = await browser.storage.local.get(null);
+    dayKeyCache = Object.keys(all).filter(isDayKey).sort();
+    return dayKeyCache;
+  }
+
+  // A compacted day stores per-domain totals rather than individual visits.
+  // Expanding it here keeps every consumer working; `synthetic` marks the ones
+  // whose clock times are no longer real so the rhythm view can exclude them.
+  function expandDay(dateKey, dayData) {
+    if (!dayData) return [];
+
+    if (dayData.compacted && dayData.totals) {
+      const base = startOfDay(dateKey);
+      return Object.entries(dayData.totals).map(([domain, entry]) => ({
+        domain,
+        start: base,
+        end: base + (entry.duration || 0) * 1000,
+        duration: entry.duration || 0,
+        visits: entry.visits || 1,
+        ...(entry.label ? { productivityLabel: entry.label } : {}),
+        synthetic: true,
+        _dateKey: dateKey
+      }));
+    }
+
+    if (!Array.isArray(dayData.sessions)) return [];
+    return dayData.sessions.map(session => ({ ...session, _dateKey: dateKey }));
+  }
+
+  function stitch(list) {
+    const valid = list.filter(session => session.start && session.end);
+    if (!valid.length) return [];
+
+    valid.sort((a, b) => a.start - b.start);
+    const merged = [];
+    let current = { ...valid[0] };
+
+    for (let i = 1; i < valid.length; i++) {
+      const next = valid[i];
+      const sameDomain = next.domain === current.domain;
+      const contiguous = (next.start - current.end) < STITCH_GAP_MS;
+      const bothReal = !current.synthetic && !next.synthetic;
+
+      if (sameDomain && contiguous && bothReal) {
+        current.end = Math.max(current.end, next.end);
+        // Sum the real tracked durations — never (end - start), which would
+        // silently absorb the idle gap between the two visits as tracked time.
+        current.duration = (current.duration || 0) + (next.duration || 0);
+        current.visits = (current.visits || 1) + (next.visits || 1);
+        if (next.ongoing) current.ongoing = true;
+        if (next.capped) current.capped = true;
+        if (next.productivityLabel && !current.productivityLabel) {
+          current.productivityLabel = next.productivityLabel;
+        }
+        if (next.projectFocus && !current.projectFocus) {
+          current.projectFocus = next.projectFocus;
+        }
+      } else {
+        merged.push(current);
+        current = { ...next };
+      }
+    }
+
+    merged.push(current);
+    return merged;
+  }
+
+  async function fetchSessions(keys) {
+    if (!keys.length) return [];
+    const response = await browser.runtime.sendMessage({ action: 'getRangeData', dates: keys });
+    const days = (response && response.days) || {};
+    const collected = [];
+    keys.forEach((dateKey) => {
+      collected.push(...expandDay(dateKey, days[dateKey]));
+    });
+    return stitch(collected);
+  }
+
+  // Trailing per-domain daily totals, used for the deviation check. Bounded to
+  // the window, so it never grows into a full-history scan.
+  async function computeDeviations() {
+    const today = todayKey();
+    const keys = Array.from({ length: DEVIATION_WINDOW_DAYS }, (_, i) => shiftKey(today, -i));
+    const stored = await browser.storage.local.get(keys);
+
+    const history = {};
+    const current = {};
+
+    keys.forEach((dateKey) => {
+      const dayTotals = {};
+      expandDay(dateKey, stored[dateKey]).forEach((session) => {
+        if (!session.domain) return;
+        dayTotals[session.domain] = (dayTotals[session.domain] || 0) + (session.duration || 0);
+      });
+
+      if (dateKey === today) {
+        Object.assign(current, dayTotals);
+      } else {
+        Object.entries(dayTotals).forEach(([domain, total]) => {
+          (history[domain] = history[domain] || []).push(total);
+        });
+      }
     });
 
-    const hourBuckets = Array.from({ length: 24 }, () => ({ focused: 0, distracted: 0, neutral: 0 }));
-    validSessions.forEach(session => {
+    const found = [];
+    Object.entries(current).forEach(([domain, total]) => {
+      if (total < DEVIATION_MIN_SECONDS) return;
+      const past = history[domain] || [];
+
+      if (past.length < DEVIATION_MIN_DAYS) {
+        if (past.length === 0) found.push({ domain, kind: 'new', total });
+        return;
+      }
+
+      const center = median(past);
+      const score = (total - center) / spreadOf(past, center);
+      if (score >= DEVIATION_MAD_THRESHOLD) {
+        found.push({ domain, kind: 'high', total, median: center, score });
+      }
+    });
+
+    return found.sort((a, b) => (b.score || 0) - (a.score || 0));
+  }
+
+  async function loadAndRender() {
+    if (scope.mode === 'all') await listDayKeys();
+
+    scopeDayKeys = scopeKeys();
+    sessions = await fetchSessions(scopeDayKeys);
+    prevSessions = await fetchSessions(previousScopeKeys());
+    hasSynthetic = sessions.some(session => session.synthetic);
+    deviations = await computeDeviations();
+
+    renderAll();
+  }
+
+  // ═══ Aggregation ═══
+
+  function totalOf(list) {
+    return list.reduce((sum, session) => sum + (session.duration || 0), 0);
+  }
+
+  function splitOf(list) {
+    const split = { productive: 0, neutral: 0, distracting: 0, untagged: 0 };
+    list.forEach((session) => {
+      split[labelOf(session) || 'untagged'] += session.duration || 0;
+    });
+    return split;
+  }
+
+  function byDomain(list) {
+    const map = {};
+    list.forEach((session) => {
+      if (!session.domain) return;
+      const entry = map[session.domain] || (map[session.domain] = {
+        domain: session.domain,
+        duration: 0,
+        visits: 0,
+        labels: { productive: 0, neutral: 0, distracting: 0, untagged: 0 },
+        capped: false
+      });
+      entry.duration += session.duration || 0;
+      entry.visits += session.visits || 1;
+      entry.labels[labelOf(session) || 'untagged'] += session.duration || 0;
+      if (session.capped) entry.capped = true;
+    });
+
+    // A domain's group is whichever label holds most of its time — a site can
+    // legitimately be productive in the morning and a sink at night.
+    Object.values(map).forEach((entry) => {
+      const [top] = Object.entries(entry.labels).sort((a, b) => b[1] - a[1]);
+      entry.label = top && top[1] > 0 ? top[0] : 'untagged';
+    });
+
+    return map;
+  }
+
+  function projectOf(session) {
+    return session.projectFocus || projectsMap[session.domain] || null;
+  }
+
+  function hourBuckets(list) {
+    const buckets = Array.from({ length: 24 }, () => ({ productive: 0, neutral: 0, distracting: 0, untagged: 0, total: 0 }));
+    list.forEach((session) => {
+      if (session.synthetic || !session.start || !session.end) return;
+      const label = labelOf(session) || 'untagged';
       let cursor = session.start;
       while (cursor < session.end) {
         const current = new Date(cursor);
@@ -996,1854 +556,1669 @@ document.addEventListener('DOMContentLoaded', async () => {
         const hourEnd = new Date(current);
         hourEnd.setMinutes(59, 59, 999);
         const sliceEnd = Math.min(session.end, hourEnd.getTime() + 1);
-        const sliceSeconds = Math.max(0, Math.floor((sliceEnd - cursor) / 1000));
-        hourBuckets[hour][classifySession(session)] += sliceSeconds;
+        const seconds = Math.max(0, Math.floor((sliceEnd - cursor) / 1000));
+        buckets[hour][label] += seconds;
+        buckets[hour].total += seconds;
         cursor = sliceEnd;
       }
     });
-
-    hourBuckets.forEach((bucket, hour) => {
-      const hourTotal = bucket.focused + bucket.distracted + bucket.neutral;
-      const block = document.createElement('div');
-      block.className = 'timeline-hour-block';
-      if (hourTotal > 0) {
-        const focusPct = (bucket.focused / hourTotal) * 100;
-        const distractedPct = (bucket.distracted / hourTotal) * 100;
-        const neutralPct = Math.max(0, 100 - focusPct - distractedPct);
-        const fill = document.createElement('div');
-        fill.className = 'timeline-hour-fill';
-        fill.style.background = `linear-gradient(180deg, ${FOCUS_COLOR} 0 ${focusPct}%, ${DISTRACT_COLOR} ${focusPct}% ${focusPct + distractedPct}%, ${NEUTRAL_COLOR} ${focusPct + distractedPct}% 100%)`;
-        fill.title = `${new Date(year, month - 1, day, hour).toLocaleTimeString('en-US', { hour: 'numeric' })}: ${formatTime(hourTotal)}`;
-        block.appendChild(fill);
-      }
-      timelineBar.appendChild(block);
-    });
-
-    ['12AM', '6AM', '12PM', '6PM', '12AM'].forEach(label => {
-      const marker = document.createElement('span');
-      marker.className = 'timeline-marker';
-      marker.textContent = label;
-      timelineMarkers.appendChild(marker);
-    });
-
-    if (hourlyUsageGraph) {
-      const maxHourTotal = Math.max(...hourBuckets.map(bucket => bucket.focused + bucket.distracted + bucket.neutral), 1);
-      const graphWrap = document.createElement('div');
-      graphWrap.className = 'hourly-usage-graph';
-
-      hourBuckets.forEach((bucket, hour) => {
-        const hourTotal = bucket.focused + bucket.distracted + bucket.neutral;
-        const bar = document.createElement('div');
-        bar.className = 'hourly-usage-bar';
-        const barHeight = hourTotal ? Math.max(10, (hourTotal / maxHourTotal) * 100) : 3;
-        bar.style.height = `${barHeight}%`;
-        bar.title = `${new Date(year, month - 1, day, hour).toLocaleTimeString('en-US', { hour: 'numeric' })}: ${formatTime(hourTotal)}`;
-
-        if (hourTotal > 0) {
-          const focusPct = (bucket.focused / hourTotal) * 100;
-          const distractedPct = (bucket.distracted / hourTotal) * 100;
-          bar.style.background = `linear-gradient(180deg, ${FOCUS_COLOR} 0 ${focusPct}%, ${DISTRACT_COLOR} ${focusPct}% ${focusPct + distractedPct}%, ${NEUTRAL_COLOR} ${focusPct + distractedPct}% 100%)`;
-          bar.classList.add('has-usage');
-        }
-
-        graphWrap.appendChild(bar);
-      });
-
-      const axis = document.createElement('div');
-      axis.className = 'hourly-usage-axis';
-      ['12AM', '6AM', '12PM', '6PM', '12AM'].forEach(label => {
-        const marker = document.createElement('span');
-        marker.textContent = label;
-        axis.appendChild(marker);
-      });
-
-      const summary = document.createElement('div');
-      summary.className = 'hourly-usage-summary';
-      const peakHour = hourBuckets.reduce((best, bucket, hour) => {
-        const total = bucket.focused + bucket.distracted + bucket.neutral;
-        const bestTotal = hourBuckets[best].focused + hourBuckets[best].distracted + hourBuckets[best].neutral;
-        return total > bestTotal ? hour : best;
-      }, 0);
-      const peakTotal = hourBuckets[peakHour].focused + hourBuckets[peakHour].distracted + hourBuckets[peakHour].neutral;
-      if (peakTotal > 0) {
-        const strong = document.createElement('strong');
-        strong.textContent = new Date(year, month - 1, day, peakHour).toLocaleTimeString('en-US', { hour: 'numeric' }).replace(' ', '');
-        summary.appendChild(document.createTextNode('Peak usage around '));
-        summary.appendChild(strong);
-        summary.appendChild(document.createTextNode(` with ${formatTime(peakTotal)} tracked.`));
-      } else {
-        summary.textContent = 'No hourly usage recorded yet.';
-      }
-
-      hourlyUsageGraph.append(graphWrap, axis, summary);
-    }
-
-    const domainTotals = {};
-    validSessions.forEach(session => {
-      domainTotals[session.domain] = (domainTotals[session.domain] || 0) + session.duration;
-    });
-    const sortedDomains = Object.entries(domainTotals).sort((a, b) => b[1] - a[1]);
-    const topDomains = sortedDomains.slice(0, 5);
-    const otherTotal = sortedDomains.slice(5).reduce((sum, [, duration]) => sum + duration, 0);
-    const topDomainPalette = ['#4FD1C5', '#84CC3E', '#EC4899', '#F59E0B', '#38BDF8'];
-    const pieParts = topDomains.map(([domain, duration], index) => ({ name: domain, duration, color: topDomainPalette[index % topDomainPalette.length] }));
-    if (otherTotal > 0) pieParts.push({ name: 'Other', duration: otherTotal, color: '#64748b' });
-    const pieScene = document.createElement('div');
-    pieScene.className = 'pie-scene';
-    const pieGlow = document.createElement('div');
-    pieGlow.className = 'pie-glow';
-    const pieDisc = document.createElement('div');
-    pieDisc.className = 'pie-disc';
-    const pieHole = document.createElement('div');
-    pieHole.className = 'pie-hole';
-    const pieInnerRatio = 0.28;
-
-    let currentDeg = 270;
-    const pieGradientSegments = [];
-    pieParts.forEach((part) => {
-      const sweep = (part.duration / totalSeconds) * 360;
-      const start = currentDeg;
-      const end = currentDeg + sweep;
-      part.midDeg = start + (sweep / 2);
-      part.startDeg = start;
-      part.endDeg = end;
-
-      const normalizedStart = ((start % 360) + 360) % 360;
-      const normalizedEnd = ((end % 360) + 360) % 360;
-      if (end - start >= 360) {
-        pieGradientSegments.push({ color: part.color, start: 0, end: 360 });
-      } else if (normalizedEnd > normalizedStart) {
-        pieGradientSegments.push({ color: part.color, start: normalizedStart, end: normalizedEnd });
-      } else {
-        pieGradientSegments.push({ color: part.color, start: normalizedStart, end: 360 });
-        pieGradientSegments.push({ color: part.color, start: 0, end: normalizedEnd });
-      }
-
-      currentDeg = end;
-    });
-    pieGradientSegments.sort((a, b) => a.start - b.start);
-    const pieGradientParts = pieGradientSegments.map(segment => `${segment.color} ${segment.start}deg ${segment.end}deg`);
-    pieDisc.style.background = `conic-gradient(${pieGradientParts.join(', ') || `${NEUTRAL_COLOR} 0deg 360deg`})`;
-    pieDisc.appendChild(pieHole);
-    pieScene.append(pieGlow, pieDisc);
-    pieWrap.appendChild(pieScene);
-
-    const pieLegend = document.createElement('div');
-    pieLegend.className = 'pie-legend';
-    const legendRows = [];
-    const setActivePiePart = (partName) => {
-      const active = pieParts.find(part => part.name === partName) || pieParts[0];
-      if (!active) return;
-      pieScene.classList.add('active-slice');
-      legendRows.forEach(row => row.classList.toggle('active', row.dataset.partName === active.name));
-      pieScene.style.setProperty('--pie-active-color', `${active.color}55`);
-      const activeRow = legendRows.find(row => row.dataset.partName === active.name);
-      if (activeRow) {
-        activeRow.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-      }
-    };
-
-    pieParts.forEach((part, index) => {
-      const percent = Math.round((part.duration / totalSeconds) * 100);
-      const row = document.createElement('div');
-      row.className = 'pie-legend-row';
-      row.dataset.partName = part.name;
-      const dot = document.createElement('span');
-      dot.className = 'chart-dot';
-      dot.style.color = part.color;
-      dot.style.background = part.color;
-      const name = document.createElement('span');
-      name.className = 'pie-name';
-      name.textContent = part.name;
-      const value = document.createElement('span');
-      value.className = 'pie-value';
-      value.textContent = `${percent}%`;
-      row.append(dot, name, value);
-      row.addEventListener('click', () => setActivePiePart(part.name));
-      if (index === 0) row.classList.add('active');
-      legendRows.push(row);
-      pieLegend.appendChild(row);
-    });
-    pieDisc.addEventListener('click', (event) => {
-      const rect = pieDisc.getBoundingClientRect();
-      const centerX = rect.left + rect.width / 2;
-      const centerY = rect.top + rect.height / 2;
-      const dx = event.clientX - centerX;
-      const dy = event.clientY - centerY;
-      const distance = Math.sqrt((dx * dx) + (dy * dy));
-      const outerRadius = rect.width / 2;
-      const innerRadius = outerRadius * pieInnerRatio;
-
-      if (distance < innerRadius || distance > outerRadius) return;
-
-      const rawAngle = (Math.atan2(dy, dx) * 180 / Math.PI + 90 + 360) % 360;
-      const hit = pieParts.find((part) => {
-        const start = (part.startDeg + 360) % 360;
-        const end = (part.endDeg + 360) % 360;
-        if (start <= end) return rawAngle >= start && rawAngle <= end;
-        return rawAngle >= start || rawAngle <= end;
-      });
-
-      if (hit) setActivePiePart(hit.name);
-    });
-    if (pieParts.length) setActivePiePart(pieParts[0].name);
-    pieWrap.appendChild(pieLegend);
-
-    const hourlySwitches = Array.from({ length: 24 }, (_, hour) => ({ hour, count: 0 }));
-    let switchCount = 0;
-    for (let i = 1; i < validSessions.length; i++) {
-      if (validSessions[i].domain !== validSessions[i - 1].domain) {
-        switchCount++;
-        hourlySwitches[new Date(validSessions[i].start).getHours()].count++;
-      }
-    }
-    const activeHours = hourlySwitches.filter(item => item.count > 0);
-    const hoursToRender = (activeHours.length ? activeHours : hourlySwitches.slice(0, 6)).slice(0, 6);
-    const maxSwitches = Math.max(...hoursToRender.map(item => item.count), 1);
-    hoursToRender.forEach(item => {
-      const hourLabel = new Date(year, month - 1, day, item.hour).toLocaleTimeString('en-US', { hour: 'numeric' }).replace(' ', '');
-      const row = document.createElement('div');
-      row.className = 'switch-bar-row';
-      const hour = document.createElement('span');
-      hour.className = 'switch-hour';
-      hour.textContent = hourLabel;
-      const track = document.createElement('div');
-      track.className = 'switch-track-line';
-      const fill = document.createElement('div');
-      fill.className = 'switch-track-fill';
-      fill.style.width = `${(item.count / maxSwitches) * 100}%`;
-      track.appendChild(fill);
-      const count = document.createElement('span');
-      count.className = 'switch-count';
-      count.textContent = `${item.count}`;
-      row.append(hour, track, count);
-      switchBar.appendChild(row);
-    });
-    const peakSwitch = activeHours.sort((a, b) => b.count - a.count)[0];
-    switchStats.textContent = '';
-    if (switchCount === 0) {
-      switchStats.textContent = 'No context switching recorded for this day.';
-    } else {
-      const totalStrong = document.createElement('strong');
-      totalStrong.textContent = `${switchCount}`;
-      switchStats.appendChild(totalStrong);
-      switchStats.appendChild(document.createTextNode(' switches total. '));
-      if (peakSwitch) {
-        switchStats.appendChild(document.createTextNode('Most turbulence happened around '));
-        const peakStrong = document.createElement('strong');
-        peakStrong.textContent = new Date(year, month - 1, day, peakSwitch.hour)
-          .toLocaleTimeString('en-US', { hour: 'numeric' })
-          .replace(' ', '');
-        switchStats.appendChild(peakStrong);
-        switchStats.appendChild(document.createTextNode('.'));
-      }
-    }
-
-    groups.forEach(group => {
-      const startLabel = new Date(group.start).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-      const endLabel = new Date(group.end).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-      const dominant = energyTags[group.id] || Object.entries(group.counts).sort((a, b) => b[1] - a[1])[0][0];
-      const title = dominant === 'focused'
-        ? 'Deep Work'
-        : dominant === 'distracted'
-          ? 'Distracted'
-          : group.duration < 5 * 60
-            ? 'Quick Check'
-            : 'Neutral Flow';
-      const note = dominant === 'focused'
-        ? (group.switches <= 1 ? 'Low switching' : 'Some switching')
-        : dominant === 'distracted'
-          ? (group.switches >= 2 ? 'High switching' : 'Attention drift')
-          : 'Mixed activity';
-
-      const card = document.createElement('div');
-      card.className = 'session-card';
-      const head = document.createElement('div');
-      head.className = 'session-card-head';
-      const titleEl = document.createElement('span');
-      titleEl.className = 'session-card-title';
-      titleEl.textContent = title;
-      const durEl = document.createElement('span');
-      durEl.className = 'session-card-duration';
-      durEl.textContent = formatTime(group.duration);
-      head.append(titleEl, durEl);
-      const meta = document.createElement('div');
-      meta.className = 'session-card-meta';
-      meta.textContent = `${startLabel} - ${endLabel} - ${group.domains.length} site${group.domains.length !== 1 ? 's' : ''} - ${group.domains.slice(0, 3).join(', ')}`;
-      const noteEl = document.createElement('span');
-      noteEl.className = `session-card-note ${dominant}`;
-      noteEl.textContent = note;
-      card.append(head, meta, noteEl);
-      sessionCards.appendChild(card);
-    });
+    return buckets;
   }
 
-  // ─── Domain List with Favicons, Avg Session, Labels ───
-  // ─── Domain List with Favicons, Avg Session, Labels ───
-  async function renderDomainSignals(container, sessions, sortedToday) {
-    container.textContent = '';
-
-    const totalToday = sessions.reduce((sum, session) => sum + (session.duration || 0), 0);
-    if (sessions.length === 0 || totalToday === 0) {
-      const emptyDiv = document.createElement('div');
-      emptyDiv.className = 'empty-state domain-signal-empty';
-      emptyDiv.textContent = 'Track a little activity to unlock domain signals.';
-      container.appendChild(emptyDiv);
-      return;
-    }
-
-    const selectedWeekKeys = getWeekDateKeysForDate(selectedDate);
-    const [year, month, day] = selectedDate.split('-').map(Number);
-    const previousWeekDate = new Date(year, month - 1, day);
-    previousWeekDate.setDate(previousWeekDate.getDate() - 7);
-    const previousWeekKey = `${previousWeekDate.getFullYear()}-${String(previousWeekDate.getMonth() + 1).padStart(2, '0')}-${String(previousWeekDate.getDate()).padStart(2, '0')}`;
-    const previousWeekKeys = getWeekDateKeysForDate(previousWeekKey);
-    const allWeekKeys = [...new Set([...selectedWeekKeys, ...previousWeekKeys])];
-    const weekData = await browser.storage.local.get(allWeekKeys);
-
-    const collectTotals = (keys) => {
-      const totals = {};
-      const daysActive = {};
-      keys.forEach((dateKey) => {
-        const dayData = weekData[dateKey] && Array.isArray(weekData[dateKey].sessions)
-          ? weekData[dateKey]
-          : { sessions: [] };
-        const dayDomains = new Set();
-        dayData.sessions.forEach((session) => {
-          if (!session.domain) return;
-          totals[session.domain] = (totals[session.domain] || 0) + (session.duration || 0);
-          dayDomains.add(session.domain);
-        });
-        dayDomains.forEach((domain) => {
-          daysActive[domain] = (daysActive[domain] || 0) + 1;
-        });
-      });
-      return { totals, daysActive };
-    };
-
-    const currentWeek = collectTotals(selectedWeekKeys);
-    const previousWeek = collectTotals(previousWeekKeys);
-    const weekTotal = Object.values(currentWeek.totals).reduce((sum, value) => sum + value, 0);
-    const previousTotal = Object.values(previousWeek.totals).reduce((sum, value) => sum + value, 0);
-    const weekDelta = weekTotal - previousTotal;
-    const weekDeltaText = previousTotal > 0
-      ? `${weekDelta >= 0 ? '+' : ''}${Math.round((weekDelta / previousTotal) * 100)}% vs last week`
-      : 'New week baseline';
-
-    const todayLeader = sortedToday[0] || null;
-    const todayLeaderShare = todayLeader ? Math.round((todayLeader[1] / totalToday) * 100) : 0;
-    const currentDomains = new Set(Object.keys(currentWeek.totals));
-    const previousDomains = new Set(Object.keys(previousWeek.totals));
-    const newDomains = [...currentDomains].filter(domain => !previousDomains.has(domain));
-    const risingDomain = Object.entries(currentWeek.totals)
-      .map(([domain, total]) => ({ domain, total, delta: total - (previousWeek.totals[domain] || 0) }))
-      .sort((a, b) => b.delta - a.delta)[0];
-    const consistentDomain = Object.entries(currentWeek.daysActive)
-      .sort((a, b) => b[1] - a[1] || (currentWeek.totals[b[0]] || 0) - (currentWeek.totals[a[0]] || 0))[0];
-
-    const categoryTotals = { focused: 0, distracted: 0, neutral: 0 };
-    sessions.forEach((session) => {
-      categoryTotals[classifySession(session)] += session.duration || 0;
-    });
-
-    const cards = [
-      {
-        label: 'Today leader',
-        value: todayLeader ? todayLeader[0] : 'None yet',
-        meta: todayLeader ? `${formatTime(todayLeader[1])} / ${todayLeaderShare}% of today` : 'No domain activity'
-      },
-      {
-        label: 'Week pace',
-        value: formatTime(weekTotal),
-        meta: weekDeltaText,
-        tone: weekDelta > 0 ? 'up' : (weekDelta < 0 ? 'down' : 'same')
-      },
-      {
-        label: newDomains.length ? 'New this week' : 'Fastest riser',
-        value: newDomains[0] || (risingDomain ? risingDomain.domain : 'None yet'),
-        meta: newDomains.length
-          ? `${newDomains.length} new domain${newDomains.length !== 1 ? 's' : ''} spotted`
-          : (risingDomain ? `${formatTime(Math.max(0, risingDomain.delta))} more than last week` : 'No change detected')
-      },
-      {
-        label: 'Most consistent',
-        value: consistentDomain ? consistentDomain[0] : 'None yet',
-        meta: consistentDomain ? `${consistentDomain[1]} active day${consistentDomain[1] !== 1 ? 's' : ''} this week` : 'Track more days'
+  function dayHourMatrix(list) {
+    const matrix = Array.from({ length: 7 }, () => new Array(24).fill(0));
+    list.forEach((session) => {
+      if (session.synthetic || !session.start || !session.end) return;
+      let cursor = session.start;
+      while (cursor < session.end) {
+        const current = new Date(cursor);
+        const weekday = (current.getDay() + 6) % 7; // Monday-first
+        const hour = current.getHours();
+        const hourEnd = new Date(current);
+        hourEnd.setMinutes(59, 59, 999);
+        const sliceEnd = Math.min(session.end, hourEnd.getTime() + 1);
+        matrix[weekday][hour] += Math.max(0, (sliceEnd - cursor) / 1000);
+        cursor = sliceEnd;
       }
-    ];
-
-    const grid = document.createElement('div');
-    grid.className = 'domain-signal-grid';
-    cards.forEach((item) => {
-      const card = document.createElement('div');
-      card.className = `domain-signal-card${item.tone ? ' ' + item.tone : ''}`;
-      const label = document.createElement('span');
-      label.className = 'domain-signal-label';
-      label.textContent = item.label;
-      const value = document.createElement('span');
-      value.className = 'domain-signal-value';
-      value.textContent = item.value;
-      value.title = item.value;
-      const meta = document.createElement('span');
-      meta.className = 'domain-signal-meta';
-      meta.textContent = item.meta;
-      card.append(label, value, meta);
-      grid.appendChild(card);
     });
-
-    const mix = document.createElement('div');
-    mix.className = 'domain-focus-mix';
-    const mixHeader = document.createElement('div');
-    mixHeader.className = 'domain-focus-mix-header';
-    const mixTitle = document.createElement('span');
-    mixTitle.textContent = 'Today focus mix';
-    const mixTotal = document.createElement('span');
-    mixTotal.textContent = formatTime(totalToday);
-    mixHeader.append(mixTitle, mixTotal);
-
-    const mixBar = document.createElement('div');
-    mixBar.className = 'domain-focus-mix-bar';
-    [
-      ['focused', categoryTotals.focused, FOCUS_COLOR],
-      ['distracted', categoryTotals.distracted, DISTRACT_COLOR],
-      ['neutral', categoryTotals.neutral, NEUTRAL_COLOR]
-    ].forEach(([name, value, color]) => {
-      const segment = document.createElement('div');
-      segment.className = `domain-focus-segment ${name}`;
-      segment.style.width = `${Math.max(totalToday ? (value / totalToday) * 100 : 0, value > 0 ? 4 : 0)}%`;
-      segment.style.backgroundColor = color;
-      segment.title = `${name}: ${formatTime(value)}`;
-      mixBar.appendChild(segment);
-    });
-
-    const legend = document.createElement('div');
-    legend.className = 'domain-focus-legend';
-    [
-      ['Focused', categoryTotals.focused, FOCUS_COLOR],
-      ['Distracted', categoryTotals.distracted, DISTRACT_COLOR],
-      ['Neutral', categoryTotals.neutral, NEUTRAL_COLOR]
-    ].forEach(([name, value, color]) => {
-      const item = document.createElement('span');
-      const dot = document.createElement('i');
-      dot.style.backgroundColor = color;
-      item.append(dot, document.createTextNode(`${name} ${formatTime(value)}`));
-      legend.appendChild(item);
-    });
-
-    mix.append(mixHeader, mixBar, legend);
-    container.append(grid, mix);
+    return matrix;
   }
 
-  async function renderAllTimeDomains() {
-    const container = document.getElementById('all-time-domain-list');
-    if (!container) return;
-
-    container.textContent = '';
-    const allData = await browser.storage.local.get(null);
-    const totals = {};
-    let grandTotal = 0;
-
-    Object.entries(allData).forEach(([dateKey, dayData]) => {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return;
-      const sessions = dayData && Array.isArray(dayData.sessions) ? dayData.sessions : [];
-      sessions.forEach((session) => {
-        if (!session.domain || !session.duration) return;
-        totals[session.domain] = (totals[session.domain] || 0) + session.duration;
-        grandTotal += session.duration;
-      });
-    });
-
-    const topDomains = Object.entries(totals)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10);
-
-    if (topDomains.length === 0) {
-      const emptyDiv = document.createElement('div');
-      emptyDiv.className = 'empty-state all-time-empty';
-      emptyDiv.textContent = 'No all-time website data yet.';
-      container.appendChild(emptyDiv);
-      return;
-    }
-
-    const maxDuration = topDomains[0][1] || 1;
-    const list = document.createElement('div');
-    list.className = 'all-time-domain-list';
-
-    topDomains.forEach(([domain, duration], index) => {
-      const row = document.createElement('div');
-      row.className = 'all-time-domain-row';
-
-      const rank = document.createElement('span');
-      rank.className = 'all-time-rank';
-      rank.textContent = String(index + 1);
-
-      const icon = document.createElement('img');
-      icon.className = 'all-time-favicon';
-      icon.src = `https://www.google.com/s2/favicons?domain=${domain}&sz=16`;
-      icon.onerror = () => {
-        icon.style.display = 'none';
-      };
-
-      const nameWrap = document.createElement('div');
-      nameWrap.className = 'all-time-domain-main';
-      const name = document.createElement('span');
-      name.className = 'all-time-domain-name';
-      name.textContent = domain;
-      name.title = domain;
-      const share = document.createElement('span');
-      share.className = 'all-time-domain-share';
-      share.textContent = `${Math.round((duration / Math.max(grandTotal, 1)) * 100)}% of tracked time`;
-      nameWrap.append(name, share);
-
-      const track = document.createElement('div');
-      track.className = 'all-time-track';
-      const fill = document.createElement('div');
-      fill.className = 'all-time-fill';
-      fill.style.backgroundColor = domainColor(domain);
-      setTimeout(() => {
-        fill.style.width = `${Math.max((duration / maxDuration) * 100, 2)}%`;
-      }, 20);
-      track.appendChild(fill);
-
-      const time = document.createElement('span');
-      time.className = 'all-time-duration';
-      time.textContent = formatTime(duration);
-
-      row.append(rank, icon, nameWrap, track, time);
-      list.appendChild(row);
-    });
-
-    container.appendChild(list);
-  }
-
-  async function renderDomains(sessions) {
-    const domainTotals = {};
-    const domainSessions = {};
-
-    sessions.forEach(s => {
-      domainTotals[s.domain] = (domainTotals[s.domain] || 0) + s.duration;
-      if (!domainSessions[s.domain]) domainSessions[s.domain] = 0;
-      domainSessions[s.domain]++;
-    });
-
-    const sorted = Object.entries(domainTotals).sort((a, b) => b[1] - a[1]);
-    const maxTime = sorted.length > 0 ? sorted[0][1] : 1;
-
-    const container = document.getElementById('domain-list-grouped');
-    if (!container) return; // View changed?
-    container.textContent = '';
-
-    if (sorted.length === 0) {
-      container.textContent = '';
-      const emptyDiv = document.createElement('div');
-      emptyDiv.className = 'empty-state';
-      emptyDiv.appendChild(document.createTextNode('No activity tracked yet.'));
-      emptyDiv.appendChild(document.createElement('br'));
-      emptyDiv.appendChild(document.createTextNode('Start browsing and come back!'));
-      container.appendChild(emptyDiv);
-      const insightContainer = document.getElementById('domain-insights-panel');
-      if (insightContainer) {
-        renderDomainSignals(insightContainer, sessions, sorted).catch(console.error);
-      }
-      renderAllTimeDomains().catch(console.error);
-      return;
-    }
-
-    const grouped = { productive: [], neutral: [], distracting: [], untagged: [] };
-    
-    // Group dynamically strictly by session tag.
-    // To support tracking domains with multiple tags, we aggregate per (domain + tag) pair.
-    const domainTagTotals = {};
-    sessions.forEach(s => {
-      let label = s.productivityLabel || productivityLabels[s.domain] || 'untagged';
-      if (label === 'distraction') label = 'distracting';
-      const key = `${s.domain}::${label}`;
-      if (!domainTagTotals[key]) domainTagTotals[key] = { domain: s.domain, label, duration: 0, visits: 0 };
-      domainTagTotals[key].duration += s.duration;
-      domainTagTotals[key].visits++;
-    });
-
-    const sortedGroups = Object.values(domainTagTotals).sort((a, b) => {
-      if (currentDomainSort === 'visits') return b.visits - a.visits;
-      return b.duration - a.duration;
-    });
-    const groupMaxTime = sortedGroups.length > 0 ? (currentDomainSort === 'visits' ? sortedGroups[0].visits : sortedGroups[0].duration) : 1;
-
-    sortedGroups.forEach(item => {
-      if (grouped[item.label]) grouped[item.label].push(item);
-      else grouped.untagged.push(item);
-    });
-
-    const groupConfig = [
-      { key: 'productive', label: 'PRODUCTIVE', color: 'var(--label-productive)' },
-      { key: 'neutral', label: 'NEUTRAL', color: 'var(--text-muted)' },
-      { key: 'distracting', label: 'DISTRACTING', color: 'var(--label-distraction)' },
-      { key: 'untagged', label: 'UNTAGGED', color: 'var(--text-faint)' }
-    ];
-
-    groupConfig.forEach(grp => {
-      if (currentDomainFilter !== 'all' && grp.key !== currentDomainFilter) return;
-      if (grouped[grp.key].length === 0) return;
-      
-      const groupDiv = document.createElement('div');
-      groupDiv.className = 'domain-group';
-      
-      const labelDiv = document.createElement('h5');
-      labelDiv.className = 'group-label';
-      const lDot = document.createElement('div');
-      lDot.className = 'group-dot';
-      lDot.style.backgroundColor = grp.color;
-      const groupTotal = grouped[grp.key].reduce((sum, item) => sum + item.duration, 0);
-      const labelText = document.createElement('span');
-      labelText.className = 'group-label-text';
-      labelText.textContent = grp.label;
-      const labelTime = document.createElement('span');
-      labelTime.className = 'group-label-time';
-      labelTime.textContent = formatTime(groupTotal);
-      labelDiv.appendChild(lDot);
-      labelDiv.append(labelText, labelTime);
-      groupDiv.appendChild(labelDiv);
-
-      grouped[grp.key].forEach(item => {
-        const pct = currentDomainSort === 'visits' ? (item.visits / groupMaxTime) * 100 : (item.duration / groupMaxTime) * 100;
-        const row = document.createElement('div');
-        row.className = 'domain-list-row';
-        row.addEventListener('click', () => {
-          showDomainDetail(item.domain, item.label, item.duration, domainSessions[item.domain] || 1);
-        });
-        
-        const dot = document.createElement('img');
-        dot.className = 'd-dot';
-        dot.src = `https://www.google.com/s2/favicons?domain=${item.domain}&sz=16`;
-        dot.onerror = () => { dot.style.display = 'none'; };
-
-        const name = document.createElement('span');
-        name.className = 'd-name';
-        name.textContent = item.domain;
-
-        const track = document.createElement('div');
-        track.className = 'd-track';
-        const fill = document.createElement('div');
-        fill.className = 'd-fill';
-        fill.style.backgroundColor = grp.color;
-        setTimeout(() => { fill.style.width = `${pct}%`; }, 10);
-        track.appendChild(fill);
-
-        const time = document.createElement('span');
-        time.className = 'd-time';
-        time.style.width = currentDomainSort === 'visits' ? '60px' : '40px';
-        time.textContent = currentDomainSort === 'visits' ? `${item.visits} visits` : formatTime(item.duration);
-
-        const trend = document.createElement('span');
-        trend.className = 'd-trend d-same';
-        trend.textContent = '—';
-
-        row.appendChild(dot);
-        row.appendChild(name);
-        row.appendChild(track);
-        row.appendChild(time);
-        row.appendChild(trend);
-        
-        groupDiv.appendChild(row);
-      });
-      container.appendChild(groupDiv);
-    });
-
-    const insightContainer = document.getElementById('domain-insights-panel');
-    if (insightContainer) {
-      renderDomainSignals(insightContainer, sessions, sorted).catch((error) => {
-        console.error('Failed to render domain signals:', error);
-        insightContainer.textContent = '';
-        const emptyDiv = document.createElement('div');
-        emptyDiv.className = 'empty-state domain-signal-empty';
-        emptyDiv.textContent = 'Domain signals are unavailable right now.';
-        insightContainer.appendChild(emptyDiv);
-      });
-    }
-    renderAllTimeDomains().catch((error) => {
-      console.error('Failed to render all-time domains:', error);
-      const allTimeContainer = document.getElementById('all-time-domain-list');
-      if (!allTimeContainer) return;
-      allTimeContainer.textContent = '';
-      const emptyDiv = document.createElement('div');
-      emptyDiv.className = 'empty-state all-time-empty';
-      emptyDiv.textContent = 'All-time website data is unavailable right now.';
-      allTimeContainer.appendChild(emptyDiv);
-    });
-
-    // Populate dummy DETAIL VIEW
-    const detailContainer = document.getElementById('domain-detail-view');
-    if (detailContainer) {
-      if (detailContainer.childNodes.length === 0 || detailContainer.textContent.trim() === '') {
-        detailContainer.textContent = '';
-        const emptyDiv = document.createElement('div');
-        emptyDiv.className = 'empty-state';
-        emptyDiv.style.cssText = 'padding: 24px; color: var(--text-faint);';
-        emptyDiv.textContent = 'Tap any domain to view details.';
-        detailContainer.appendChild(emptyDiv);
-      }
-    }
-  }
-
-  async function showDomainDetail(topDom, currentLabel, topDur, sessionsCount) {
-    const detailContainer = document.getElementById('domain-detail-view');
-    if (!detailContainer) return;
-    
-    // Smooth scroll for mobile experience if needed
-    detailContainer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-
-    let currentTag = productivityLabels[topDom] || 'untagged';
-    if (currentTag === 'distraction') currentTag = 'distracting';
-    const weekKeys = getWeekDateKeysForDate(selectedDate);
-    const weekData = await browser.storage.local.get(weekKeys);
-    let weekTotal = 0;
-    let weekSessionsCount = 0;
-    weekKeys.forEach((dateKey) => {
-      const dayData = weekData[dateKey] && Array.isArray(weekData[dateKey].sessions)
-        ? weekData[dateKey]
-        : { sessions: [] };
-      dayData.sessions.forEach((session) => {
-        if (session.domain === topDom) {
-          weekTotal += session.duration || 0;
-          weekSessionsCount += 1;
-        }
-      });
-    });
-
-    const todayDomainSessions = groupDomainDetailSessions(currentData.sessions, topDom);
-    const sessFrag = document.createDocumentFragment();
-    todayDomainSessions.forEach((s, idx) => {
-      const startObj = new Date(s.start);
-      const timeStr = startObj.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-      const durStr = formatTime(s.duration);
-      const taggedSession = s.sessions.find(session => session.productivityLabel);
-      const tag = (taggedSession && taggedSession.productivityLabel) || productivityLabels[topDom] || 'untagged';
-      
-      let colorVar = 'var(--text-muted)';
-      if (tag === 'productive') colorVar = 'var(--label-productive)';
-      if (tag === 'distracting') colorVar = 'var(--label-distraction)';
-
-      const rowDiv = document.createElement('div');
-      rowDiv.className = 'd-sess-row';
-      rowDiv.style.cssText = 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;';
-
-      const sTime = document.createElement('span');
-      sTime.className = 'd-sess-time';
-      sTime.style.cssText = 'width: 50px; font-size: 11px;';
-      sTime.textContent = timeStr;
-
-      const dTrack = document.createElement('div');
-      dTrack.className = 'd-track';
-      dTrack.style.cssText = 'flex: 1; margin: 0 12px; position: relative;';
-
-      const dFill = document.createElement('div');
-      dFill.className = 'd-fill';
-      dFill.style.cssText = `width: 100%; height: 6px; background: ${colorVar}; border-radius: 4px;`;
-      dTrack.appendChild(dFill);
-
-      const sDur = document.createElement('span');
-      sDur.className = 'd-time';
-      sDur.style.cssText = 'font-size:11px; width: 45px; text-align:right; margin-right: 4px;';
-      sDur.textContent = durStr;
-
-      const sel = document.createElement('select');
-      sel.className = 'sess-tag-select';
-      sel.dataset.idx = idx;
-      sel.style.cssText = 'margin-left: 8px; font-size: 11px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-input); background: var(--surface-color); color: var(--text-main); min-width: 95px; cursor: pointer; outline: none;';
-      
-      const opts = [
-        {val: 'productive', text: 'Productive'},
-        {val: 'neutral', text: 'Neutral'},
-        {val: 'distracting', text: 'Distracting'},
-        {val: 'untagged', text: 'Untagged'}
-      ];
-      opts.forEach(o => {
-        const opt = document.createElement('option');
-        opt.value = o.val;
-        opt.textContent = o.text;
-        if (tag === o.val) opt.selected = true;
-        sel.appendChild(opt);
-      });
-
-      rowDiv.append(sTime, dTrack, sDur, sel);
-      sessFrag.appendChild(rowDiv);
-    });
-
-    detailContainer.textContent = '';
-    
-    const dViewBox = document.createElement('div');
-    dViewBox.className = 'detail-view-box';
-
-    const btnClose = document.createElement('button');
-    btnClose.className = 'detail-close';
-    btnClose.id = 'detail-close-btn';
-    btnClose.textContent = '✕';
-
-    const dHead = document.createElement('div');
-    dHead.className = 'detail-header';
-    const hdImg = document.createElement('img');
-    hdImg.className = 'd-dot';
-    hdImg.style.cssText = 'width:20px;height:20px;';
-    hdImg.src = `https://www.google.com/s2/favicons?domain=${topDom}&sz=16`;
-    hdImg.onerror = () => { hdImg.style.display = 'none'; };
-    const hdTxt = document.createElement('span');
-    hdTxt.className = 'd-name';
-    hdTxt.style.fontSize = '16px';
-    hdTxt.textContent = topDom;
-    dHead.append(hdImg, hdTxt);
-
-    const tagSect = document.createElement('div');
-    tagSect.className = 'detail-tag-selector';
-    tagSect.style.cssText = 'margin-top: 16px; margin-bottom: 20px;';
-    
-    const tsLbl = document.createElement('span');
-    tsLbl.style.cssText = 'font-size: 11px; text-transform: uppercase; color: var(--text-muted); font-weight: 600; display: block; margin-bottom: 8px;';
-    tsLbl.textContent = 'Set Default Tag for Domain';
-    
-    const tsBtnGrp = document.createElement('div');
-    tsBtnGrp.style.cssText = 'display: flex; gap: 8px;';
-    
-    const mkBtn = (val, txt) => {
-      const b = document.createElement('button');
-      b.className = 'btn-tag tag-btn';
-      b.dataset.tag = val;
-      b.style.cssText = 'flex: 1; padding: 6px; font-size: 12px; transition: all 0.2s;';
-      b.textContent = txt;
-      return b;
-    };
-    tsBtnGrp.append(mkBtn('productive', 'Productive'), mkBtn('neutral', 'Neutral'), mkBtn('distracting', 'Distracting'));
-    tagSect.append(tsLbl, tsBtnGrp);
-
-    const statRow = document.createElement('div');
-    statRow.className = 'detail-stats-row';
-    const mkSb = (lbl, val) => {
-      const b = document.createElement('div'); b.className = 'd-stat-box';
-      const sl = document.createElement('span'); sl.className = 'd-stat-lbl'; sl.textContent = lbl;
-      const sv = document.createElement('span'); sv.className = 'd-stat-val'; sv.textContent = val;
-      b.append(sl, sv);
-      return b;
-    };
-    statRow.append(
-      mkSb('Today', formatTime(topDur)),
-      mkSb('This week', formatTime(weekTotal)),
-      mkSb('Week visits', weekSessionsCount)
-    );
-
-    const sTitle = document.createElement('div');
-    sTitle.className = 'detail-sessions-title';
-    sTitle.textContent = 'Sessions today (Edit per-session)';
-
-    const sCont = document.createElement('div');
-    sCont.className = 'sessions-list-container';
-    sCont.style.cssText = 'max-height: 150px; overflow-y: auto; padding-right: 4px;';
-    sCont.appendChild(sessFrag);
-
-    dViewBox.append(btnClose, dHead, tagSect, statRow, sTitle, sCont);
-    detailContainer.appendChild(dViewBox);
-
-    // Highlight current global tag
-    const tagBtns = detailContainer.querySelectorAll('.tag-btn');
-    tagBtns.forEach(btn => {
-      const tag = btn.dataset.tag;
-      if (tag === currentTag) {
-        let colorVar = 'var(--text-muted)';
-        if (tag === 'productive') colorVar = 'var(--label-productive)';
-        if (tag === 'distracting') colorVar = 'var(--label-distraction)';
-        btn.style.backgroundColor = colorVar;
-        btn.style.color = '#fff';
-        btn.style.borderColor = colorVar;
-      }
-
-      // Wire up clicks to save default Domain tag
-      btn.addEventListener('click', async () => {
-        productivityLabels[topDom] = tag;
-        await browser.storage.local.set({ productivityLabels });
-        renderDomains(currentData.sessions);
-        await showDomainDetail(topDom, currentLabel, topDur, sessionsCount);
-      });
-    });
-
-    // Wire up session-specific selects
-    detailContainer.querySelectorAll('.sess-tag-select').forEach(sel => {
-      sel.addEventListener('change', async (e) => {
-        const idx = parseInt(e.target.dataset.idx);
-        const newTag = e.target.value;
-        const targetGroup = todayDomainSessions[idx];
-        if (!targetGroup) return;
-
-        targetGroup.sessions.forEach((groupedSession) => {
-          const mainIdx = currentData.sessions.findIndex(s => (
-            s === groupedSession ||
-            (
-              s.domain === groupedSession.domain &&
-              s.start === groupedSession.start &&
-              s.end === groupedSession.end
-            )
-          ));
-          if (mainIdx !== -1) {
-            currentData.sessions[mainIdx].productivityLabel = newTag;
-          }
-        });
-
-        const objToSave = {};
-        const dataToSave = JSON.parse(JSON.stringify(currentData));
-        dataToSave.sessions = dataToSave.sessions.filter(s => !s.ongoing);
-        objToSave[selectedDate] = dataToSave;
-        await browser.storage.local.set(objToSave);
-
-        const row = e.target.closest('.d-sess-row');
-        const fill = row ? row.querySelector('.d-fill') : null;
-        if (fill) {
-          let nextColor = 'var(--text-muted)';
-          if (newTag === 'productive') nextColor = 'var(--label-productive)';
-          if (newTag === 'distracting') nextColor = 'var(--label-distraction)';
-          fill.style.background = nextColor;
-        }
-        renderDomains(currentData.sessions);
-      });
-    });
-
-    document.getElementById('detail-close-btn').addEventListener('click', () => {
-      detailContainer.textContent = '';
-      const emptyDiv = document.createElement('div');
-      emptyDiv.className = 'empty-state';
-      emptyDiv.style.cssText = 'padding: 24px; color: var(--text-faint);';
-      emptyDiv.textContent = 'Tap any domain to view details.';
-      detailContainer.appendChild(emptyDiv);
-    });
-  }
-
-  function domainColor(str) {
-    const palette = ['#4FD1C5', '#84CC3E', '#EC4899', '#F59E0B', '#38BDF8', '#94A3B8'];
-    if (str.includes('leetcode.com')) return '#FFA116';
-    if (str.includes('x.com') || str.includes('twitter.com')) return '#1DA1F2';
-    
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
-    return palette[Math.abs(hash) % palette.length];
-  }
-
-  function buildProjectSessionBlocks(sessions, projectName) {
-    const ordered = [...sessions]
-      .filter(session => session.start && session.end)
+  function buildBlocks(list) {
+    const ordered = list
+      .filter(session => !session.synthetic && session.start && session.end)
       .sort((a, b) => a.start - b.start);
+
     const blocks = [];
-    const gapMs = 3 * 60 * 1000;
+    let current = null;
 
     ordered.forEach((session) => {
-      const last = blocks[blocks.length - 1];
-      if (!last || session.start - last.end > gapMs) {
-        blocks.push({
-          projectName,
+      const label = labelOf(session) || 'untagged';
+      if (!current || (session.start - current.end) > BLOCK_GAP_MS) {
+        current = {
           start: session.start,
           end: session.end,
           duration: session.duration || 0,
-          domains: new Set([session.domain]),
-          sessionCount: 1
-        });
+          domains: [session.domain],
+          weights: { productive: 0, neutral: 0, distracting: 0, untagged: 0 },
+          switches: 0
+        };
+        current.weights[label] += session.duration || 0;
+        blocks.push(current);
         return;
       }
 
-      last.end = Math.max(last.end, session.end);
-      last.duration += session.duration || 0;
-      last.domains.add(session.domain);
-      last.sessionCount += 1;
+      if (current.domains[current.domains.length - 1] !== session.domain) current.switches++;
+      current.end = Math.max(current.end, session.end);
+      current.duration += session.duration || 0;
+      if (!current.domains.includes(session.domain)) current.domains.push(session.domain);
+      current.weights[label] += session.duration || 0;
     });
 
     return blocks;
   }
 
-  // ─── Projects List ───
-  async function renderProjects(sessions) {
-    const allData = await browser.storage.local.get(null);
-    const dateKeys = Object.keys(allData).filter(k => /^\d{4}-\d{2}-\d{2}$/.test(k)).sort();
-    
-    projectGoals = allData.projectGoals || projectGoals || {};
-    activeProjectFocus = allData.activeProjectFocus || activeProjectFocus || null;
-    const projStats = {};
-    
-    // Ensure all user-defined projects are displayed, even with 0 tracked time
-    Object.entries(projectsMap).forEach(([domain, pName]) => {
-      if (pName !== 'Unassigned') {
-        if (!projStats[pName]) {
-          projStats[pName] = { allTime: 0, thisWeek: 0, manualAllTime: 0, manualThisWeek: 0, daysActive: new Set(), manualDaysActive: new Set(), domains: new Set(), sessions: [] };
-        }
-        projStats[pName].domains.add(domain);
-      }
-    });
-    
-    // "This Week" keys
-    const today = new Date();
-    const dayOfWeek = today.getDay();
-    const mondayOffset = (dayOfWeek === 0 ? 6 : dayOfWeek - 1);
-    const thisMonday = new Date(today);
-    thisMonday.setDate(today.getDate() - mondayOffset);
-    thisMonday.setHours(0, 0, 0, 0);
-    
-    const thisWeekKeys = [];
-    for (let i = 0; i < 7; i++) {
-        const d1 = new Date(thisMonday);
-        d1.setDate(thisMonday.getDate() + i);
-        thisWeekKeys.push(`${d1.getFullYear()}-${String(d1.getMonth() + 1).padStart(2, '0')}-${String(d1.getDate()).padStart(2, '0')}`);
+  function countSwitches(list) {
+    const ordered = list
+      .filter(session => !session.synthetic && session.start)
+      .sort((a, b) => a.start - b.start);
+    let count = 0;
+    for (let i = 1; i < ordered.length; i++) {
+      if (ordered[i].domain !== ordered[i - 1].domain) count++;
+    }
+    return count;
+  }
+
+  // ═══ Home strip ═══
+
+  function renderHome() {
+    const total = totalOf(sessions);
+    const split = splitOf(sessions);
+    const previousTotal = totalOf(prevSessions);
+
+    $('home-total').textContent = formatTime(total);
+
+    const totalMeta = $('home-total-meta');
+    if (scope.mode === 'all') {
+      totalMeta.textContent = `${scopeDayKeys.length} day${scopeDayKeys.length === 1 ? '' : 's'} on record`;
+      totalMeta.className = 'home-meta';
+    } else if (previousTotal === 0) {
+      totalMeta.textContent = 'no prior period to compare';
+      totalMeta.className = 'home-meta';
+    } else {
+      const diff = total - previousTotal;
+      totalMeta.textContent = diff === 0
+        ? 'same as the period before'
+        : `${diff > 0 ? '↑' : '↓'} ${formatTime(Math.abs(diff))} vs the period before`;
+      totalMeta.className = `home-meta ${diff > 0 ? 'up' : diff < 0 ? 'down' : 'same'}`;
     }
 
-    let totalAllTime = 0; 
-    let totalThisWeek = 0;
+    // Split bar
+    const bar = $('home-split-bar');
+    const legend = $('home-split-legend');
+    clear(bar);
+    clear(legend);
 
-    dateKeys.forEach(dk => {
-      const dayData = allData[dk] && Array.isArray(allData[dk].sessions) ? allData[dk] : { sessions: [] };
-      if (!dayData || !dayData.sessions) return;
-      const isThisWeek = thisWeekKeys.includes(dk);
-      const activeProjectsOnDay = new Set();
+    const untaggedShare = total > 0 ? split.untagged / total : 0;
+    const provisional = untaggedShare > CONFIDENCE_UNTAGGED_LIMIT;
+    bar.classList.toggle('is-provisional', provisional);
 
-      dayData.sessions.forEach(s => {
-        if (!s.domain) return;
-        const mappedProject = projectsMap[s.domain];
-        const manualProject = s.projectFocus;
-        const pName = manualProject || mappedProject || 'Unassigned';
-        if (!projStats[pName]) {
-          projStats[pName] = { allTime: 0, thisWeek: 0, manualAllTime: 0, manualThisWeek: 0, daysActive: new Set(), manualDaysActive: new Set(), domains: new Set(), sessions: [] };
-        }
-        
-        projStats[pName].allTime += s.duration;
-        totalAllTime += s.duration;
-        if (isThisWeek) {
-          projStats[pName].thisWeek += s.duration;
-          totalThisWeek += s.duration;
-        }
-        projStats[pName].domains.add(s.domain);
-        activeProjectsOnDay.add(pName);
+    if (total === 0) {
+      bar.appendChild(el('div', 'home-split-empty'));
+      legend.appendChild(el('span', 'home-split-note', 'Nothing tracked in this range.'));
+    } else {
+      [
+        ['productive', split.productive, FOCUS_COLOR],
+        ['neutral', split.neutral, NEUTRAL_COLOR],
+        ['distracting', split.distracting, DISTRACT_COLOR],
+        ['untagged', split.untagged, FAINT_COLOR]
+      ].forEach(([name, value, color]) => {
+        if (value <= 0) return;
+        const segment = el('div', `home-split-segment ${name}`);
+        segment.style.width = `${(value / total) * 100}%`;
+        segment.style.backgroundColor = color;
+        segment.title = `${name}: ${formatTime(value)}`;
+        bar.appendChild(segment);
 
-        if (manualProject) {
-          if (!projStats[manualProject]) {
-            projStats[manualProject] = { allTime: 0, thisWeek: 0, manualAllTime: 0, manualThisWeek: 0, daysActive: new Set(), manualDaysActive: new Set(), domains: new Set(), sessions: [] };
-          }
-          projStats[manualProject].manualAllTime += s.duration;
-          projStats[manualProject].manualDaysActive.add(dk);
-          projStats[manualProject].domains.add(s.domain);
-          if (isThisWeek) {
-            projStats[manualProject].manualThisWeek += s.duration;
-            projStats[manualProject].sessions.push({ ...s, dateKey: dk });
-          }
-        }
+        const item = el('span', 'home-split-item');
+        const dot = el('i');
+        dot.style.backgroundColor = color;
+        item.append(dot, document.createTextNode(`${pct(value, total)}% ${name}`));
+        legend.appendChild(item);
       });
-      activeProjectsOnDay.forEach(pName => projStats[pName].daysActive.add(dk));
+
+      if (provisional) {
+        legend.appendChild(el('span', 'home-split-note',
+          'Provisional — too much is untagged to call this a measurement.'));
+      }
+    }
+
+    // Untagged
+    $('home-untagged').textContent = total > 0 ? `${pct(split.untagged, total)}%` : '—';
+    const untaggedMeta = $('home-untagged-meta');
+    clear(untaggedMeta);
+    if (split.untagged > 0) {
+      untaggedMeta.appendChild(document.createTextNode(`${formatTime(split.untagged)} · `));
+      const link = el('button', 'link-inline', 'tag it');
+      link.addEventListener('click', () => { reviewWeekOffset = 0; openReview(); });
+      untaggedMeta.appendChild(link);
+    } else if (total > 0) {
+      untaggedMeta.textContent = 'everything is labelled';
+    }
+
+    // Notable
+    const top = deviations[0];
+    if (!top) {
+      $('home-notable').textContent = 'Nothing unusual';
+      $('home-notable-meta').textContent = 'today sits inside your normal range';
+    } else if (top.kind === 'new') {
+      $('home-notable').textContent = top.domain;
+      $('home-notable-meta').textContent = `new — no history in the last ${DEVIATION_WINDOW_DAYS} days`;
+    } else {
+      $('home-notable').textContent = top.domain;
+      $('home-notable-meta').textContent = `${formatTime(top.total)} today vs a typical ${formatTime(top.median)}`;
+    }
+  }
+
+  // ═══ Where ═══
+
+  function renderWhere() {
+    const container = $('where-list');
+    clear(container);
+
+    const total = totalOf(sessions);
+    if (!sessions.length) {
+      container.appendChild(emptyState('Nothing tracked in this range yet.'));
+      renderProjects();
+      return;
+    }
+
+    const domains = Object.values(byDomain(sessions));
+    const sortValue = entry => whereSort === 'visits' ? entry.visits : entry.duration;
+    const maxValue = Math.max(...domains.map(sortValue), 1);
+
+    if (whereGroup === 'project') {
+      renderGroupedByProject(container, domains, maxValue, sortValue);
+    } else {
+      renderGroupedByLabel(container, domains, maxValue, sortValue, total);
+    }
+
+    renderProjects();
+  }
+
+  function domainRow(entry, maxValue, sortValue, color) {
+    const row = el('button', 'where-row');
+    row.setAttribute('aria-label', `${entry.domain}, ${formatTime(entry.duration)}`);
+
+    const badge = domainBadge(entry.domain, 18);
+    const name = el('span', 'where-row-name', entry.domain);
+    name.title = entry.domain;
+
+    const track = el('div', 'where-row-track');
+    const fill = el('div', 'where-row-fill');
+    fill.style.backgroundColor = color;
+    fill.style.width = `${(sortValue(entry) / maxValue) * 100}%`;
+    track.appendChild(fill);
+
+    const value = el('span', 'where-row-value', whereSort === 'visits'
+      ? `${entry.visits} visit${entry.visits === 1 ? '' : 's'}`
+      : formatTime(entry.duration));
+
+    row.append(badge, name, track, value);
+
+    if (entry.capped) {
+      const flag = el('span', 'where-row-flag', 'capped');
+      flag.title = 'At least one visit ran past the 2-hour safety cap, so this total is a floor, not the exact figure.';
+      row.appendChild(flag);
+    }
+
+    row.addEventListener('click', () => openDetail(entry.domain));
+    return row;
+  }
+
+  function renderGroupedByLabel(container, domains, maxValue, sortValue, total) {
+    const groups = [
+      { key: 'productive', label: 'Productive', color: FOCUS_COLOR },
+      { key: 'neutral', label: 'Neutral', color: NEUTRAL_COLOR },
+      { key: 'distracting', label: 'Distracting', color: DISTRACT_COLOR },
+      { key: 'untagged', label: 'Untagged', color: FAINT_COLOR }
+    ];
+
+    let rendered = 0;
+
+    groups.forEach((group) => {
+      if (whereFilter !== 'all' && whereFilter !== group.key) return;
+
+      const members = domains
+        .filter(entry => entry.label === group.key)
+        .sort((a, b) => sortValue(b) - sortValue(a));
+      if (!members.length) return;
+
+      rendered += members.length;
+      const groupTotal = members.reduce((sum, entry) => sum + entry.duration, 0);
+
+      const head = el('div', 'where-group-head');
+      const dot = el('span', 'where-group-dot');
+      dot.style.backgroundColor = group.color;
+      head.append(
+        dot,
+        el('span', 'where-group-name', group.label),
+        el('span', 'where-group-total', `${formatTime(groupTotal)} · ${pct(groupTotal, total)}%`)
+      );
+      container.appendChild(head);
+
+      members.forEach(entry => container.appendChild(domainRow(entry, maxValue, sortValue, group.color)));
     });
 
-    const displayProjects = Object.entries(projStats)
-        .filter(([pName, stats]) => pName !== 'Unassigned')
-        .sort((a, b) => b[1].allTime - a[1].allTime);
+    if (!rendered) container.appendChild(emptyState('Nothing in this filter for the selected range.'));
+  }
 
-    // Calc Streaks
-    const todayStr = getTodayString();
-
-    displayProjects.forEach(([pName, stats]) => {
-      let streak = 0;
-      let d = new Date();
-      let dk = todayStr;
-      let missedToday = false;
-
-      if (stats.daysActive.has(dk)) {
-        streak++;
-      } else {
-        missedToday = true;
-      }
-      
-      d.setDate(d.getDate() - 1);
-      while(true) {
-        dk = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-        if (stats.daysActive.has(dk)) {
-          streak++;
-          missedToday = false; 
-        } else {
-          if (missedToday) break; 
-          else break;
-        }
-        d.setDate(d.getDate() - 1);
-      }
-      stats.streak = streak;
-
-      stats.goalSecs = projectGoals[pName] || (8 * 3600);
+  function renderGroupedByProject(container, domains, maxValue, sortValue) {
+    const buckets = {};
+    domains.forEach((entry) => {
+      if (whereFilter !== 'all' && entry.label !== whereFilter) return;
+      const name = projectsMap[entry.domain] || 'Unassigned';
+      (buckets[name] = buckets[name] || []).push(entry);
     });
 
-    // 1. AUTO-TAGGING (mocked)
-    const autoContainer = document.getElementById('auto-tag-container');
-    if (autoContainer) {
-      autoContainer.textContent = '';
-      const focusBox = document.createElement('div');
-      focusBox.className = 'focus-mode-box';
+    const sum = list => list.reduce((total, entry) => total + entry.duration, 0);
+    const names = Object.keys(buckets).sort((a, b) => {
+      if (a === 'Unassigned') return 1;
+      if (b === 'Unassigned') return -1;
+      return sum(buckets[b]) - sum(buckets[a]);
+    });
 
-      const title = document.createElement('div');
-      title.className = 'focus-mode-title';
-      title.dataset.focusModeTitle = 'true';
-      title.textContent = activeProjectFocus ? activeProjectFocus.projectName : 'No active project session';
+    if (!names.length) {
+      container.appendChild(emptyState('Nothing in this filter for the selected range.'));
+      return;
+    }
 
-      const desc = document.createElement('div');
-      desc.className = 'focus-mode-desc';
-      desc.dataset.focusModeDesc = 'true';
-      desc.textContent = activeProjectFocus
-        ? `Running for ${formatTime(getProjectFocusElapsed())}. Stay on the project and use the start button on any card to switch focus.`
-        : 'Pick a project and start a dedicated timer. This gives your projects an explicit active state without interrupting normal browser tracking.';
+    names.forEach((name) => {
+      const members = buckets[name].sort((a, b) => sortValue(b) - sortValue(a));
+      const color = name === 'Unassigned' ? FAINT_COLOR : domainColor(name);
 
-      const actions = document.createElement('div');
-      actions.className = 'focus-mode-actions';
+      const head = el('div', 'where-group-head');
+      const dot = el('span', 'where-group-dot');
+      dot.style.backgroundColor = color;
+      head.append(
+        dot,
+        el('span', 'where-group-name', name),
+        el('span', 'where-group-total', formatTime(sum(members)))
+      );
+      container.appendChild(head);
 
-      if (activeProjectFocus) {
-        const stopBtn = document.createElement('button');
-        stopBtn.className = 'focus-mode-btn danger';
-        stopBtn.textContent = 'Stop session';
-        stopBtn.addEventListener('click', async () => {
+      members.forEach(entry => container.appendChild(domainRow(entry, maxValue, sortValue, color)));
+    });
+  }
+
+  // ═══ Projects ═══
+
+  function projectDirection(name) {
+    return (projectMeta[name] && projectMeta[name].direction) || 'floor';
+  }
+
+  async function weekTotalsByProject() {
+    const monday = mondayOf(todayKey());
+    const keys = Array.from({ length: 7 }, (_, i) => shiftKey(monday, i));
+    const weekSessions = await fetchSessions(keys);
+    const totals = {};
+    weekSessions.forEach((session) => {
+      const name = projectOf(session);
+      if (!name) return;
+      totals[name] = (totals[name] || 0) + (session.duration || 0);
+    });
+    return totals;
+  }
+
+  async function renderProjects() {
+    const container = $('project-list');
+    if (!container) return;
+    clear(container);
+
+    const names = [...new Set([...Object.values(projectsMap), ...Object.keys(projectGoals)])]
+      .filter(Boolean)
+      .sort();
+
+    if (!names.length) {
+      container.appendChild(emptyState('No projects yet. A project is a set of sites with a weekly goal.'));
+      return;
+    }
+
+    const weekTotals = await weekTotalsByProject();
+
+    names.forEach((name) => {
+      const card = el('div', 'project-card');
+      const goal = projectGoals[name] || null;
+      const direction = projectDirection(name);
+      const thisWeek = weekTotals[name] || 0;
+      const isFocused = activeProjectFocus && activeProjectFocus.projectName === name;
+
+      const head = el('div', 'project-head');
+      const titleGroup = el('div', 'project-title-group');
+      const dot = el('span', 'project-dot');
+      dot.style.backgroundColor = domainColor(name);
+      titleGroup.append(dot, el('span', 'project-name', name));
+
+      const actions = el('div', 'project-actions');
+
+      const focusBtn = el('button', `project-btn${isFocused ? ' active' : ''}`,
+        isFocused ? 'Stop session' : 'Start session');
+      focusBtn.addEventListener('click', async () => {
+        activeProjectFocus = isFocused ? null : { projectName: name, startTime: Date.now() };
+        await browser.storage.local.set({ activeProjectFocus });
+        await browser.runtime.sendMessage({ action: 'syncProjectFocusBoundary' });
+        renderProjects();
+      });
+
+      const editBtn = el('button', 'project-btn subtle', 'Edit');
+      editBtn.addEventListener('click', () => openProjectModal(name));
+
+      const deleteBtn = el('button', 'project-btn subtle danger', 'Delete');
+      deleteBtn.addEventListener('click', async () => {
+        const mapped = Object.keys(projectsMap).filter(domain => projectsMap[domain] === name);
+        const confirmed = confirm(
+          `Delete the project "${name}"?\n\n` +
+          `${mapped.length} site${mapped.length === 1 ? '' : 's'} will be unmapped and the goal removed. ` +
+          'Your tracked history is not deleted.'
+        );
+        if (!confirmed) return;
+
+        mapped.forEach(domain => { delete projectsMap[domain]; });
+        delete projectGoals[name];
+        delete projectMeta[name];
+        if (activeProjectFocus && activeProjectFocus.projectName === name) {
           activeProjectFocus = null;
           await browser.storage.local.set({ activeProjectFocus: null });
           await browser.runtime.sendMessage({ action: 'syncProjectFocusBoundary' });
-          renderProjects(currentData.sessions || []);
-        });
-        actions.appendChild(stopBtn);
-      } else {
-        const hint = document.createElement('div');
-        hint.className = 'focus-mode-hint';
-        hint.textContent = 'Use "Start session" on a project card below.';
-        actions.appendChild(hint);
-      }
+        }
+        await browser.storage.local.set({ projectMappings: projectsMap, projectGoals, projectMeta });
+        renderProjects();
+      });
 
-      focusBox.append(title, desc, actions);
-      autoContainer.appendChild(focusBox);
-    }
+      actions.append(focusBtn, editBtn, deleteBtn);
+      head.append(titleGroup, actions);
+      card.appendChild(head);
 
-    // 2. PROJECTS LIST
-    const listContainer = document.getElementById('project-list-new');
-    if (listContainer) {
-      listContainer.textContent = '';
-      if (displayProjects.length === 0) {
-        listContainer.textContent = '';
-        const emptyDiv = document.createElement('div');
-        emptyDiv.className = 'empty-state';
-        emptyDiv.style.marginBottom = '16px';
-        emptyDiv.textContent = 'No projects created yet.';
-        listContainer.appendChild(emptyDiv);
-      } else {
-        displayProjects.forEach(([projName, stats]) => {
-          const doms = Array.from(stats.domains).slice(0, 3);
-          const pct = Math.min((stats.thisWeek / stats.goalSecs) * 100, 100);
-          const isOverBudget = stats.thisWeek > stats.goalSecs;
-          
-          const statusClass = isOverBudget ? 'proj-status-over-budget' : 'proj-status-on-track';
-          const statusText = isOverBudget ? 'Over budget' : 'On track';
-          const barColor = isOverBudget ? '#ef4444' : '#34d399'; 
-          const dotColor = (projName === 'Development') ? '#3b82f6' : (projName === 'Reading' ? '#10b981' : 'var(--accent-primary)');
-          const isFocusActive = activeProjectFocus && activeProjectFocus.projectName === projName;
+      if (goal) {
+        // A floor that is exceeded is the good outcome; a ceiling that is
+        // exceeded is not. The old build painted both as "over budget".
+        const met = direction === 'floor' ? thisWeek >= goal : thisWeek <= goal;
+        const progress = el('div', 'project-progress');
 
-          const pCard = document.createElement('div');
-          pCard.className = 'proj-item-card';
+        const labels = el('div', 'project-progress-labels');
+        labels.append(
+          el('span', null, direction === 'floor' ? 'Weekly goal — reach' : 'Weekly goal — stay under'),
+          el('span', 'project-progress-value', `${formatTime(thisWeek)} / ${formatTime(goal)}`)
+        );
 
-          // Header
-          const header = document.createElement('div'); header.className = 'proj-header';
-          const titleGrp = document.createElement('div'); titleGrp.className = 'proj-title-group';
-          const pDot = document.createElement('div'); pDot.className = 'proj-dot'; pDot.style.backgroundColor = dotColor;
-          const pName = document.createElement('span'); pName.className = 'proj-name'; pName.textContent = projName;
-          titleGrp.append(pDot, pName);
-          const headerActions = document.createElement('div');
-          headerActions.className = 'proj-header-actions';
-          const startBtn = document.createElement('button');
-          startBtn.className = `proj-session-btn${isFocusActive ? ' active' : ''}`;
-          startBtn.dataset.projectFocusActive = isFocusActive ? 'true' : 'false';
-          startBtn.textContent = isFocusActive ? `Running ${formatTime(getProjectFocusElapsed())}` : 'Start session';
-          startBtn.addEventListener('click', async () => {
-            activeProjectFocus = isFocusActive ? null : { projectName: projName, startTime: Date.now() };
-            await browser.storage.local.set({ activeProjectFocus });
-            await browser.runtime.sendMessage({ action: 'syncProjectFocusBoundary' });
-            renderProjects(currentData.sessions || []);
-          });
-          const viewSessionsBtn = document.createElement('button');
-          viewSessionsBtn.className = 'proj-session-btn subtle';
-          const sessionBlocks = buildProjectSessionBlocks(stats.sessions, projName);
-          viewSessionsBtn.textContent = `Browse sessions (${sessionBlocks.length})`;
-          viewSessionsBtn.setAttribute('aria-expanded', 'false');
-          const statPill = document.createElement('div'); statPill.className = `proj-status-pill ${statusClass}`; statPill.textContent = statusText;
-          headerActions.append(startBtn, viewSessionsBtn, statPill);
-          header.append(titleGrp, headerActions);
-
-          // Stats
-          const statsGrid = document.createElement('div'); statsGrid.className = 'proj-stats-grid';
-          const mkStatCol = (val, lbl) => {
-            const col = document.createElement('div'); col.className = 'proj-stat-col';
-            const pVal = document.createElement('div'); pVal.className = 'p-val'; pVal.textContent = val;
-            const pLbl = document.createElement('div'); pLbl.className = 'p-lbl'; pLbl.textContent = lbl;
-            col.append(pVal, pLbl);
-            return col;
-          };
-          statsGrid.append(
-            mkStatCol(formatTime(stats.thisWeek), 'This week'),
-            mkStatCol(formatTime(stats.manualThisWeek), 'Manual sessions'),
-            mkStatCol(formatTime(stats.allTime), 'All time'),
-            mkStatCol(stats.streak, 'Day streak')
-          );
-
-          // Progress
-          const progSect = document.createElement('div'); progSect.className = 'proj-progress-section';
-          const progLbls = document.createElement('div'); progLbls.className = 'proj-prog-labels';
-          const lblLeft = document.createElement('span'); lblLeft.className = 'p-lbl-left'; lblLeft.textContent = 'Weekly goal';
-          const lblRight = document.createElement('span'); lblRight.className = 'p-lbl-right'; lblRight.textContent = `${formatTime(stats.thisWeek)} / ${formatTime(stats.goalSecs)}`;
-          progLbls.append(lblLeft, lblRight);
-          const barWrap = document.createElement('div'); barWrap.className = 'proj-bar-track-wrap';
-          const barFill = document.createElement('div'); barFill.className = 'proj-bar-fill-wrap';
-          barFill.style.cssText = `width: ${pct}%; background-color: ${barColor};`;
-          barWrap.appendChild(barFill);
-          const goalEdit = document.createElement('div');
-          goalEdit.className = 'project-goal-edit';
-          goalEdit.hidden = true;
-          const goalInput = document.createElement('input');
-          goalInput.type = 'text';
-          goalInput.inputMode = 'decimal';
-          goalInput.setAttribute('pattern', '[0-9]*[.]?[0-9]+');
-          goalInput.className = 'clean-input project-goal-input';
-          goalInput.value = (stats.goalSecs / 3600).toString();
-          goalInput.placeholder = 'Hours';
-          const goalSaveBtn = document.createElement('button');
-          goalSaveBtn.className = 'goal-mini-btn confirm';
-          goalSaveBtn.textContent = 'Save';
-          goalSaveBtn.addEventListener('click', async () => {
-            const nextHours = Number(goalInput.value.trim());
-            if (!(nextHours > 0)) {
-              alert('Enter a weekly goal greater than 0 hours.');
-              return;
-            }
-            projectGoals[projName] = Math.round(nextHours * 3600);
-            await browser.storage.local.set({ projectGoals });
-            renderProjects(currentData.sessions || []);
-          });
-          const goalCancelBtn = document.createElement('button');
-          goalCancelBtn.className = 'goal-mini-btn';
-          goalCancelBtn.textContent = 'Cancel';
-          goalCancelBtn.addEventListener('click', () => {
-            goalEdit.hidden = true;
-            goalInput.value = (stats.goalSecs / 3600).toString();
-            goalMetaRow.classList.remove('editing');
-          });
-          goalEdit.append(goalInput, goalSaveBtn, goalCancelBtn);
-
-          const goalMetaRow = document.createElement('div');
-          goalMetaRow.className = 'project-goal-meta';
-          const goalChip = document.createElement('button');
-          goalChip.className = 'project-goal-chip';
-          goalChip.textContent = 'Edit goal';
-          goalChip.setAttribute('aria-label', `Edit weekly goal for ${projName}`);
-          goalChip.addEventListener('click', () => {
-            goalEdit.hidden = !goalEdit.hidden;
-            goalMetaRow.classList.toggle('editing', !goalEdit.hidden);
-            if (!goalEdit.hidden) goalInput.focus();
-          });
-          goalMetaRow.appendChild(goalChip);
-          progSect.append(progLbls, barWrap, goalMetaRow, goalEdit);
-
-          // Domains
-          const dmsList = document.createElement('div'); dmsList.className = 'proj-domains-list'; dmsList.id = `doms-${projName.replace(/\s+/g, '')}`;
-          const dBtn = document.createElement('button'); dBtn.className = 'proj-add-btn'; dBtn.textContent = '+ Add domain';
-          dBtn.addEventListener('click', () => {
-            const addProjectModal = document.getElementById('add-project-modal');
-            const inputProjName = document.getElementById('new-project-name');
-            const inputProjDomain = document.getElementById('new-project-domain');
-            const inputProjGoal = document.getElementById('new-project-goal');
-            
-            if (addProjectModal && inputProjName && inputProjDomain) {
-              inputProjName.value = projName;
-              inputProjDomain.value = '';
-              if (inputProjGoal) inputProjGoal.value = stats.goalSecs / 3600;
-              addProjectModal.classList.add('open');
-              addProjectModal.setAttribute('aria-hidden', 'false');
-            }
-          });
-          dmsList.appendChild(dBtn);
-
-          const sessionsPanel = document.createElement('div');
-          sessionsPanel.className = 'project-sessions-panel';
-          sessionsPanel.hidden = true;
-          const sessionsTitle = document.createElement('div');
-          sessionsTitle.className = 'project-sessions-title';
-          sessionsTitle.textContent = 'Manual sessions this week';
-          const sessionsList = document.createElement('div');
-          sessionsList.className = 'project-sessions-list';
-          const visibleBlocks = [...sessionBlocks].sort((a, b) => b.start - a.start).slice(0, 20);
-          if (visibleBlocks.length === 0) {
-            const empty = document.createElement('div');
-            empty.className = 'project-session-empty';
-            empty.textContent = 'No manual project sessions this week yet. Start a session on this project to make it appear here.';
-            sessionsList.appendChild(empty);
-          } else {
-            visibleBlocks.forEach((block, idx) => {
-              const row = document.createElement('div');
-              row.className = 'project-session-row';
-              const when = document.createElement('span');
-              when.className = 'project-session-when';
-              const startDate = new Date(block.start);
-              when.textContent = `${startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} ${startDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-              const sessionName = document.createElement('span');
-              sessionName.className = 'project-session-domain';
-              sessionName.textContent = `${projName} Session ${visibleBlocks.length - idx}`;
-              sessionName.title = Array.from(block.domains).join(', ');
-              const meta = document.createElement('span');
-              meta.className = 'project-session-meta';
-              const domains = Array.from(block.domains);
-              meta.textContent = `${block.sessionCount} site visit${block.sessionCount !== 1 ? 's' : ''} - ${domains.slice(0, 3).join(', ')}${domains.length > 3 ? ' +' + (domains.length - 3) : ''}`;
-              const duration = document.createElement('span');
-              duration.className = 'project-session-duration';
-              duration.textContent = formatTime(block.duration || 0);
-              const blockInfo = document.createElement('div');
-              blockInfo.className = 'project-session-info';
-              blockInfo.append(sessionName, meta);
-              row.append(when, blockInfo, duration);
-              sessionsList.appendChild(row);
-            });
-          }
-          sessionsPanel.append(sessionsTitle, sessionsList);
-          viewSessionsBtn.addEventListener('click', () => {
-            sessionsPanel.hidden = !sessionsPanel.hidden;
-            viewSessionsBtn.setAttribute('aria-expanded', String(!sessionsPanel.hidden));
-            viewSessionsBtn.textContent = sessionsPanel.hidden
-              ? `Browse sessions (${sessionBlocks.length})`
-              : 'Hide sessions';
-          });
-
-          pCard.append(header, statsGrid, progSect, dmsList, sessionsPanel);
-
-          listContainer.appendChild(pCard);
-
-          const domsList = document.getElementById(`doms-${projName.replace(/\s+/g, '')}`);
-          doms.forEach(d => {
-            const pill = document.createElement('div');
-            pill.className = 'proj-domain-pill';
-            pill.textContent = d;
-            domsList.insertBefore(pill, domsList.lastElementChild);
-          });
-        });
-      }
-    }
-
-    // 3. BREAKDOWN LIST
-    const breakdownContainer = document.getElementById('project-breakdown-list');
-    if (breakdownContainer) {
-      breakdownContainer.textContent = '';
-      if (totalThisWeek === 0) totalThisWeek = 1;
-
-      Object.entries(projStats).sort((a,b) => b[1].thisWeek - a[1].thisWeek).forEach(([projName, stats]) => {
-        if (stats.thisWeek === 0) return;
-        const pctReal = (stats.thisWeek / totalThisWeek) * 100;
-        const color = projName === 'Unassigned' ? 'var(--text-faint)' : (pctReal > 50 ? 'var(--accent-primary)' : 'var(--label-productive)');
-        const bRow = document.createElement('div');
-        bRow.className = 'breakdown-row';
-        const dot = document.createElement('div');
-        dot.className = 'breakdown-dot';
-        dot.style.backgroundColor = color;
-
-        const name = document.createElement('span');
-        name.className = 'breakdown-name';
-        name.textContent = projName;
-
-        const track = document.createElement('div');
-        track.className = 'breakdown-track';
-        const fill = document.createElement('div');
-        fill.className = 'breakdown-fill';
-        fill.style.cssText = `width: ${pctReal}%; background-color: ${color}`;
+        const track = el('div', 'project-bar-track');
+        const fill = el('div', 'project-bar-fill');
+        fill.style.width = `${Math.min((thisWeek / goal) * 100, 100)}%`;
+        fill.style.backgroundColor = met ? FOCUS_COLOR : (direction === 'ceiling' ? DISTRACT_COLOR : NEUTRAL_COLOR);
         track.appendChild(fill);
 
-        const time = document.createElement('span');
-        time.className = 'breakdown-time';
-        time.textContent = formatTime(stats.thisWeek);
+        const status = el('span', `project-status ${met ? 'met' : 'open'}`,
+          direction === 'floor'
+            ? (met ? 'Goal met' : `${formatTime(goal - thisWeek)} to go`)
+            : (met ? 'Within budget' : `${formatTime(thisWeek - goal)} over`));
 
-        const pct = document.createElement('span');
-        pct.className = 'breakdown-pct';
-        pct.textContent = `${Math.round(pctReal)}%`;
+        progress.append(labels, track, status);
+        card.appendChild(progress);
+      }
 
-        bRow.append(dot, name, track, time, pct);
-        breakdownContainer.appendChild(bRow);
+      const domainList = el('div', 'project-domains');
+      Object.keys(projectsMap).filter(domain => projectsMap[domain] === name).forEach((domain) => {
+        const pill = el('span', 'project-domain-pill');
+        pill.appendChild(document.createTextNode(domain));
+        const remove = el('button', 'project-domain-remove', '×');
+        remove.setAttribute('aria-label', `Remove ${domain} from ${name}`);
+        remove.addEventListener('click', async () => {
+          delete projectsMap[domain];
+          await browser.storage.local.set({ projectMappings: projectsMap });
+          renderProjects();
+        });
+        pill.appendChild(remove);
+        domainList.appendChild(pill);
       });
-    }
+      card.appendChild(domainList);
+
+      container.appendChild(card);
+    });
   }
 
-  // ─── Insights ───
-  async function renderInsights() {
-    const d = new Date();
-    const dateKeys = [];
-    for (let i = 0; i < 28; i++) {
-      const past = new Date(d);
-      past.setDate(past.getDate() - i);
-      const ds = `${past.getFullYear()}-${String(past.getMonth() + 1).padStart(2, '0')}-${String(past.getDate()).padStart(2, '0')}`;
-      dateKeys.push(ds);
-    }
-    const heatmapWeekKeys = getWeekDateKeys(heatmapWeekOffset);
-    const allData = await browser.storage.local.get([...new Set([...dateKeys, ...heatmapWeekKeys])]);
+  // ═══ Detail drawer: the primary drill-down ═══
 
-    // ── 7-day comparison ──
-    let thisWeekTotal = 0;
-    for (let i = 0; i < 7; i++) {
-      const dataDay = allData[dateKeys[i]] && Array.isArray(allData[dateKeys[i]].sessions)
-        ? allData[dateKeys[i]]
-        : { sessions: [] };
-      thisWeekTotal += dataDay.sessions.reduce((acc, s) => acc + s.duration, 0);
-    }
-    const sevenDayAvg = thisWeekTotal / 7;
-    const todayData = allData[dateKeys[0]] && Array.isArray(allData[dateKeys[0]].sessions)
-      ? allData[dateKeys[0]]
-      : { sessions: [] };
-    const todayTotal = todayData.sessions.reduce((acc, s) => acc + s.duration, 0);
+  const drawer = $('detail-drawer');
 
-    const compValEl = document.getElementById('insight-comparison');
-    const compSubEl = document.getElementById('insight-comparison-sub');
-    if (sevenDayAvg === 0) {
-      compValEl.textContent = formatTime(todayTotal);
-      compSubEl.textContent = 'No rolling average yet — keep tracking!';
-    } else {
-      const diff = todayTotal - sevenDayAvg;
-      const pct = Math.abs(diff / sevenDayAvg) * 100;
-      const sign = diff >= 0 ? '↑' : '↓';
-      compValEl.textContent = `${sign} ${pct.toFixed(0)}%`;
-      compValEl.style.color = diff >= 0 ? 'var(--label-distraction)' : 'var(--label-productive)';
-      compSubEl.textContent = `${formatTime(todayTotal)} today vs ${formatTime(Math.round(sevenDayAvg))} 7-day avg.`;
-    }
+  function closeDrawer() {
+    drawer.classList.remove('open');
+    drawer.setAttribute('aria-hidden', 'true');
+    openDetailDomain = null;
+  }
 
-    // ── Context Switching ──
-    const todaySessions = (currentData.sessions || []).filter(s => s.start);
-    let switchCount = 0;
-    for (let i = 1; i < todaySessions.length; i++) {
-      if (todaySessions[i].domain !== todaySessions[i - 1].domain) switchCount++;
-    }
-    const refocusCostSec = switchCount * 26; // ~26 sec average re-focus cost
+  function openDetail(domain) {
+    openDetailDomain = domain;
+    drawer.classList.add('open');
+    drawer.setAttribute('aria-hidden', 'false');
+    renderDetail();
+    $('drawer-close').focus();
+  }
 
-    const switchValEl = document.getElementById('insight-switches');
-    const switchSubEl = document.getElementById('insight-switches-sub');
-    switchValEl.textContent = switchCount;
-    if (switchCount === 0) {
-      switchSubEl.textContent = 'No context switches yet today. Excellent focus!';
-    } else {
-      switchSubEl.textContent = `Est. re-focus cost: ~${formatTime(refocusCostSec)} lost to switching.`;
+  function renderDetail() {
+    if (!openDetailDomain) return;
+    const domain = openDetailDomain;
+
+    const title = $('drawer-title');
+    clear(title);
+    title.append(domainBadge(domain, 24), el('span', 'drawer-title-name', domain));
+
+    const body = $('drawer-body');
+    clear(body);
+
+    const own = sessions.filter(session => session.domain === domain);
+    const total = totalOf(own);
+    const visits = own.reduce((sum, session) => sum + (session.visits || 1), 0);
+
+    const stats = el('div', 'drawer-stats');
+    [
+      [scopeLabel(), formatTime(total)],
+      ['Share', `${pct(total, totalOf(sessions))}%`],
+      ['Visits', String(visits)],
+      ['Average visit', formatTime(visits ? total / visits : 0)]
+    ].forEach(([label, value]) => {
+      const cell = el('div', 'drawer-stat');
+      cell.append(el('span', 'drawer-stat-label', label), el('span', 'drawer-stat-value', value));
+      stats.appendChild(cell);
+    });
+    body.appendChild(stats);
+
+    if (own.some(session => session.capped)) {
+      body.appendChild(el('div', 'drawer-warning',
+        'At least one visit ran past the 2-hour safety cap. The total above is a floor, not the exact figure.'));
     }
 
-    // ── Focus Pattern ──
-    const heatmapData = Array(7).fill(0).map(() => Array(24).fill(0));
-    const correlationData = Array(7).fill(0).map(() => Array(4).fill(0));
+    body.appendChild(el('h5', 'drawer-section', 'Counts as'));
+    body.appendChild(buildRuleEditor(domain));
 
-    heatmapWeekKeys.forEach(dk => {
-      const dayData = allData[dk] && Array.isArray(allData[dk].sessions) ? allData[dk] : { sessions: [] };
-      if (!dayData || !dayData.sessions) return;
-      dayData.sessions.forEach(s => {
-        if (!s.start || !s.end) return;
-        let cursor = new Date(s.start);
-        const endDate = new Date(s.end);
-        const dayOfWeek = cursor.getDay();
+    body.appendChild(el('h5', 'drawer-section', 'If-then plan'));
+    body.appendChild(buildPlanEditor(domain));
 
-        while (cursor < endDate) {
-          const hr = cursor.getHours();
-          const endOfHour = new Date(cursor);
-          endOfHour.setMinutes(59, 59, 999);
-          const sliceEnd = endOfHour < endDate ? endOfHour : endDate;
-          const sliceSeconds = Math.max(0, (sliceEnd - cursor) / 1000);
+    body.appendChild(el('h5', 'drawer-section', 'Speed bump'));
+    body.appendChild(buildSpeedBumpEditor(domain));
 
-          heatmapData[dayOfWeek][hr] += sliceSeconds;
+    body.appendChild(el('h5', 'drawer-section', `Visits in ${scopeLabel().toLowerCase()}`));
+    body.appendChild(buildSessionList(domain, own));
+  }
 
-          let partIdx = 3;
-          if (hr >= 6 && hr < 12) partIdx = 0;
-          else if (hr >= 12 && hr < 18) partIdx = 1;
-          else if (hr >= 18 && hr < 24) partIdx = 2;
-          correlationData[dayOfWeek][partIdx] += sliceSeconds;
+  function buildRuleEditor(domain) {
+    const wrap = el('div', 'rule-editor');
+    const rules = labelRules[domain] || [];
 
-          cursor = new Date(endOfHour.getTime() + 1);
-        }
+    if (!rules.length) {
+      wrap.appendChild(el('p', 'rule-empty', 'Untagged. Its time is counted but lands in no column.'));
+    }
+
+    rules.forEach((rule, index) => {
+      const row = el('div', 'rule-row');
+      const chip = el('span', 'rule-chip', LABEL_NAMES[rule.label] || rule.label);
+      chip.style.borderColor = labelColor(rule.label);
+      chip.style.color = labelColor(rule.label);
+
+      const remove = el('button', 'rule-remove', '×');
+      remove.setAttribute('aria-label', 'Remove this rule');
+      remove.addEventListener('click', async () => {
+        labelRules[domain] = rules.filter((_, i) => i !== index);
+        if (!labelRules[domain].length) delete labelRules[domain];
+        await saveLabelRules();
+        renderDetail();
+        renderHome();
+        renderWhere();
       });
+
+      row.append(chip, el('span', 'rule-desc', describeRule(rule)), remove);
+      wrap.appendChild(row);
     });
 
-    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    const partNames = ['mornings', 'afternoons', 'evenings', 'nights'];
+    // Add-rule form
+    const form = el('div', 'rule-form');
 
-    let maxVal = -1, maxDay = -1, maxPart = -1;
-    let minVal = Infinity, minDay = -1, minPart = -1;
+    const labelSelect = el('select', 'clean-input rule-input');
+    labelSelect.setAttribute('aria-label', 'Label');
+    VALID_LABELS.forEach((value) => {
+      const option = el('option', null, LABEL_NAMES[value]);
+      option.value = value;
+      labelSelect.appendChild(option);
+    });
 
-    for (let dIdx = 0; dIdx < 7; dIdx++) {
-      for (let p = 0; p < 4; p++) {
-        const val = correlationData[dIdx][p];
-        if (val > maxVal) { maxVal = val; maxDay = dIdx; maxPart = p; }
-        if (val > 0 && val < minVal) { minVal = val; minDay = dIdx; minPart = p; }
+    const whenSelect = el('select', 'clean-input rule-input');
+    whenSelect.setAttribute('aria-label', 'Condition');
+    [
+      ['always', 'by default'],
+      ['hours', 'between hours'],
+      ['project', 'during a project'],
+      ['path', 'on a path']
+    ].forEach(([value, text]) => {
+      const option = el('option', null, text);
+      option.value = value;
+      whenSelect.appendChild(option);
+    });
+
+    const detailWrap = el('div', 'rule-form-detail');
+
+    const fromInput = el('select', 'clean-input rule-input');
+    const toInput = el('select', 'clean-input rule-input');
+    fromInput.setAttribute('aria-label', 'From hour');
+    toInput.setAttribute('aria-label', 'To hour');
+    for (let hour = 0; hour < 24; hour++) {
+      [fromInput, toInput].forEach((select) => {
+        const option = el('option', null, formatHour(hour));
+        option.value = String(hour);
+        select.appendChild(option);
+      });
+    }
+    fromInput.value = '22';
+    toInput.value = '6';
+
+    const projectSelect = el('select', 'clean-input rule-input');
+    projectSelect.setAttribute('aria-label', 'Project');
+    [...new Set(Object.values(projectsMap))].sort().forEach((name) => {
+      const option = el('option', null, name);
+      option.value = name;
+      projectSelect.appendChild(option);
+    });
+
+    const pathInput = el('input', 'clean-input rule-input');
+    pathInput.type = 'text';
+    pathInput.placeholder = '/watch';
+    pathInput.setAttribute('aria-label', 'Path prefix');
+
+    function syncForm() {
+      clear(detailWrap);
+      if (whenSelect.value === 'hours') {
+        detailWrap.append(el('span', 'rule-form-word', 'from'), fromInput, el('span', 'rule-form-word', 'to'), toInput);
+      } else if (whenSelect.value === 'project') {
+        if (projectSelect.options.length) detailWrap.appendChild(projectSelect);
+        else detailWrap.appendChild(el('span', 'rule-form-word', 'create a project first'));
+      } else if (whenSelect.value === 'path') {
+        detailWrap.appendChild(pathInput);
       }
     }
+    whenSelect.addEventListener('change', syncForm);
+    syncForm();
 
-    const corrEl = document.getElementById('insight-correlation');
-    corrEl.textContent = '';
-    if (maxVal === 0) {
-      corrEl.textContent = 'Not enough data recorded over the past 28 days to determine focus patterns.';
-    } else if (minVal === Infinity || minVal === 0) {
-      corrEl.textContent = 'You are most focused on ';
-      const strong = document.createElement('strong');
-      strong.textContent = `${dayNames[maxDay]} ${partNames[maxPart]}`;
-      corrEl.appendChild(strong);
-      corrEl.appendChild(document.createTextNode('. Track more days to unlock contrast comparisons.'));
+    const addBtn = el('button', 'btn-outline-settings rule-add', 'Add rule');
+    addBtn.addEventListener('click', async () => {
+      const when = {};
+      if (whenSelect.value === 'hours') {
+        when.fromHour = Number(fromInput.value);
+        when.toHour = Number(toInput.value);
+      } else if (whenSelect.value === 'project') {
+        if (!projectSelect.value) return;
+        when.project = projectSelect.value;
+      } else if (whenSelect.value === 'path') {
+        const path = pathInput.value.trim();
+        if (!path) return;
+        when.path = path.startsWith('/') ? path : `/${path}`;
+      }
+
+      const rule = { label: labelSelect.value, when };
+      const existing = labelRules[domain] || [];
+      // Conditional rules are tried before the default, so they have to sit
+      // above it in the list.
+      labelRules[domain] = ruleIsConditional(rule)
+        ? [rule, ...existing]
+        : [...existing.filter(ruleIsConditional), rule];
+
+      await saveLabelRules();
+      renderDetail();
+      renderHome();
+      renderWhere();
+    });
+
+    form.append(labelSelect, whenSelect, detailWrap, addBtn);
+    wrap.appendChild(form);
+
+    if ((labelRules[domain] || []).some(rule => (rule.when || {}).path)) {
+      wrap.appendChild(el('p', 'rule-note',
+        'Path rules are applied as you browse. Past visits keep only their domain, so they are not re-labelled retroactively.'));
+    }
+
+    return wrap;
+  }
+
+  function buildPlanEditor(domain) {
+    const wrap = el('div', 'plan-editor');
+    wrap.appendChild(el('p', 'plan-intro',
+      'Naming the cue and the replacement is the single best-evidenced thing you can do here. It gets shown back to you at the moment it applies.'));
+
+    const row = el('div', 'plan-row');
+    row.appendChild(el('span', 'plan-prefix', `When I open ${domain}, I will`));
+
+    const input = el('input', 'clean-input plan-input');
+    input.type = 'text';
+    input.value = plans[domain] || '';
+    input.placeholder = 'close it and go back to the draft';
+    input.setAttribute('aria-label', `If-then plan for ${domain}`);
+
+    const save = el('button', 'btn-outline-settings', 'Save');
+    save.addEventListener('click', async () => {
+      const value = input.value.trim();
+      if (value) plans[domain] = value;
+      else delete plans[domain];
+      await browser.storage.local.set({ plans });
+      save.textContent = 'Saved';
+      setTimeout(() => { save.textContent = 'Save'; }, 1200);
+    });
+
+    row.append(input, save);
+    wrap.appendChild(row);
+    return wrap;
+  }
+
+  function buildSpeedBumpEditor(domain) {
+    const wrap = el('div', 'speedbump-editor');
+    const config = speedBumpSites[domain] || {};
+
+    wrap.appendChild(el('p', 'plan-intro',
+      'A pause, not a wall. Opening this site shows today’s number and your plan, then lets you through. ' +
+      'Off unless you turn it on, and it asks for access to this site only.'));
+
+    const row = el('label', 'speedbump-row');
+    const toggle = el('input');
+    toggle.type = 'checkbox';
+    toggle.checked = Boolean(config.enabled);
+    row.append(toggle, el('span', null, `Show a speed bump on ${domain}`));
+
+    const status = el('p', 'speedbump-status');
+
+    toggle.addEventListener('change', async () => {
+      const origins = [`*://${domain}/*`, `*://*.${domain}/*`];
+
+      if (toggle.checked) {
+        let granted = false;
+        try {
+          // Must be the first thing in the handler — awaiting anything before
+          // this loses the user gesture the permission prompt requires.
+          granted = await browser.permissions.request({ origins });
+        } catch (error) {
+          granted = false;
+        }
+        if (!granted) {
+          toggle.checked = false;
+          status.textContent = 'Access to this site was not granted, so the speed bump stays off.';
+          return;
+        }
+        speedBumpSites[domain] = { ...config, enabled: true };
+        status.textContent = 'On. It appears at most once every 30 minutes.';
+      } else {
+        delete speedBumpSites[domain];
+        status.textContent = 'Off.';
+        try {
+          await browser.permissions.remove({ origins });
+        } catch (error) {
+          // Access may be retained for other reasons; the script is
+          // unregistered below regardless.
+        }
+      }
+
+      await browser.storage.local.set({ speedBumpSites });
+      await browser.runtime.sendMessage({ action: 'syncSpeedBump' });
+    });
+
+    wrap.append(row, status);
+    return wrap;
+  }
+
+  function buildSessionList(domain, own) {
+    const wrap = el('div', 'session-list');
+    const real = own.filter(session => !session.synthetic).sort((a, b) => b.start - a.start);
+
+    if (!real.length) {
+      wrap.appendChild(el('p', 'rule-empty', 'No individual visits stored for this range.'));
+      return wrap;
+    }
+
+    real.slice(0, 40).forEach((session) => {
+      const row = el('div', 'session-row');
+      const when = el('span', 'session-when',
+        `${parseKey(session._dateKey).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} ${formatClockTime(session.start)}`);
+
+      const select = el('select', 'clean-input session-select');
+      select.setAttribute('aria-label', 'Label for this visit');
+      [['', 'Untagged'], ...VALID_LABELS.map(value => [value, LABEL_NAMES[value]])].forEach(([value, text]) => {
+        const option = el('option', null, text);
+        option.value = value;
+        select.appendChild(option);
+      });
+      select.value = labelOf(session) || '';
+
+      select.addEventListener('change', async () => {
+        await setSessionLabel(session, select.value || null);
+        renderHome();
+        renderWhere();
+      });
+
+      row.append(when, el('span', 'session-duration', formatTime(session.duration)), select);
+      wrap.appendChild(row);
+    });
+
+    return wrap;
+  }
+
+  // Writes onto the stored day record. `sessions` is a stitched in-memory
+  // projection that also carries the live ongoing slice — persisting it would
+  // flatten the raw history and double-count active time.
+  async function setSessionLabel(session, label) {
+    const dateKey = session._dateKey;
+    if (!dateKey) return;
+
+    const stored = await browser.storage.local.get(dateKey);
+    const day = stored[dateKey];
+    if (!day || !Array.isArray(day.sessions)) return;
+
+    day.sessions.forEach((raw) => {
+      if (raw.domain !== session.domain) return;
+      if (raw.start >= session.start && raw.end <= session.end) {
+        if (label) raw.productivityLabel = label;
+        else delete raw.productivityLabel;
+      }
+    });
+
+    await browser.storage.local.set({ [dateKey]: day });
+    if (label) session.productivityLabel = label;
+    else delete session.productivityLabel;
+  }
+
+  // ═══ When ═══
+
+  function renderWhen() {
+    const container = $('rhythm');
+    const title = $('rhythm-title');
+    const note = $('rhythm-note');
+    clear(container);
+    clear(note);
+
+    const real = sessions.filter(session => !session.synthetic);
+
+    if (!real.length) {
+      title.textContent = 'Rhythm';
+      container.appendChild(emptyState(
+        hasSynthetic
+          ? 'This range is compacted history — totals are exact, but the individual clock times are gone.'
+          : 'Nothing tracked in this range yet.'
+      ));
+      renderBlocks([]);
+      return;
+    }
+
+    if (hasSynthetic) {
+      note.textContent = 'Compacted days are excluded — their clock times are no longer stored.';
+    }
+
+    if (scope.mode === 'day') {
+      title.textContent = 'Hour by hour';
+      renderHourBars(container, real);
+    } else if (scope.mode === 'month') {
+      title.textContent = 'Day by day';
+      renderCalendar(container, real);
     } else {
-      const pctDiff = ((maxVal - minVal) / minVal) * 100;
-      corrEl.textContent = 'You are ';
-      const strong = document.createElement('strong');
-      strong.textContent = `${pctDiff.toFixed(0)}% more focused`;
-      corrEl.appendChild(strong);
-      corrEl.appendChild(document.createTextNode(` on ${dayNames[maxDay]} ${partNames[maxPart]} compared to ${dayNames[minDay]} ${partNames[minPart]}.`));
+      title.textContent = scope.mode === 'all' ? 'Typical week' : 'Hour by day';
+      renderHeatmap(container, real);
     }
 
-    // ── Heatmap ──
-    const yAxis = document.getElementById('heatmap-y-axis');
-    yAxis.textContent = '';
-    const grid = document.getElementById('heatmap-grid');
-    grid.textContent = '';
-    const xAxis = document.getElementById('heatmap-x-axis');
-    xAxis.textContent = '';
-    const heatmapSection = document.querySelector('.heatmap-section');
-    if (heatmapRangeLabel) heatmapRangeLabel.textContent = formatHeatmapRangeLabel(heatmapWeekKeys);
-    if (heatmapNextWeekBtn) heatmapNextWeekBtn.disabled = heatmapWeekOffset === 0;
+    renderBlocks(real);
+  }
 
-    const displayDayOrder = [1, 2, 3, 4, 5, 6, 0];
-    const shortDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    const weekDateByDay = {};
-    heatmapWeekKeys.forEach((dateKey) => {
-      const [year, month, day] = dateKey.split('-').map(Number);
-      weekDateByDay[new Date(year, month - 1, day).getDay()] = dateKey;
+  function renderHourBars(container, list) {
+    const buckets = hourBuckets(list);
+    const max = Math.max(...buckets.map(bucket => bucket.total), 1);
+
+    const graph = el('div', 'hour-bars');
+    buckets.forEach((bucket, hour) => {
+      const bar = el('div', 'hour-bar');
+      bar.style.height = bucket.total ? `${Math.max(6, (bucket.total / max) * 100)}%` : '2px';
+      bar.title = `${formatHour(hour)} — ${formatTime(bucket.total)}`;
+
+      if (bucket.total > 0) {
+        const stops = [];
+        let cursor = 0;
+        [
+          ['productive', FOCUS_COLOR],
+          ['distracting', DISTRACT_COLOR],
+          ['neutral', NEUTRAL_COLOR],
+          ['untagged', FAINT_COLOR]
+        ].forEach(([key, color]) => {
+          const share = (bucket[key] / bucket.total) * 100;
+          if (share <= 0) return;
+          stops.push(`${color} ${cursor}% ${cursor + share}%`);
+          cursor += share;
+        });
+        bar.style.background = `linear-gradient(180deg, ${stops.join(', ')})`;
+        bar.classList.add('has-usage');
+      }
+
+      graph.appendChild(bar);
     });
 
-    shortDays.forEach(sd => {
-      const dEl = document.createElement('div');
-      dEl.textContent = sd;
-      yAxis.appendChild(dEl);
-    });
+    const axis = el('div', 'hour-axis');
+    ['12AM', '6AM', '12PM', '6PM', '12AM'].forEach(text => axis.appendChild(el('span', null, text)));
 
-    for (let i = 0; i < 24; i += 3) {
-      const xEl = document.createElement('div');
-      xEl.className = 'heatmap-x-label';
-      const ampm = i >= 12 ? 'PM' : 'AM';
-      const displayI = i % 12 === 0 ? 12 : i % 12;
-      xEl.textContent = `${displayI}${ampm}`;
-      xEl.style.gridColumn = 'span 3';
-      xEl.style.textAlign = 'left';
-      xAxis.appendChild(xEl);
+    const peak = buckets.reduce((best, bucket, hour) => bucket.total > buckets[best].total ? hour : best, 0);
+    const summary = el('div', 'rhythm-summary');
+    if (buckets[peak].total > 0) {
+      summary.append(
+        document.createTextNode('Busiest around '),
+        el('strong', null, formatHour(peak)),
+        document.createTextNode(` with ${formatTime(buckets[peak].total)}.`)
+      );
     }
 
-    const heatMax = Math.max(...heatmapData.flat(), 1);
-    const hasAnyData = heatmapData.flat().some(v => v > 0);
+    container.append(graph, axis, summary);
+  }
 
-    displayDayOrder.forEach((dIdx, rowIdx) => {
-      for (let hr = 0; hr < 24; hr++) {
-        const cell = document.createElement('div');
-        cell.className = 'heatmap-cell';
-        const val = heatmapData[dIdx][hr];
+  function renderHeatmap(container, list) {
+    const matrix = dayHourMatrix(list);
+    const max = Math.max(...matrix.flat(), 1);
 
-        if (val > 0) {
-          const scaled = 0.15 + (val / heatMax) * 0.85;
-          cell.style.opacity = Math.min(scaled, 1.0);
+    const grid = el('div', 'heatmap');
+    matrix.forEach((row, dayIndex) => {
+      grid.appendChild(el('div', 'heatmap-day', DAY_SHORT[dayIndex]));
+      row.forEach((value, hour) => {
+        const cell = el('div', 'heatmap-cell');
+        if (value > 0) {
           cell.classList.add('has-data');
-
-          // Compute the date for this cell (approx: find dated match)
-          const fullDayName = dayNames[dIdx];
-          cell.title = `${shortDays[rowIdx]} ${hr}:00 - ${formatTime(val)}\nClick to view this day`;
-
-          cell.addEventListener('click', () => {
-            const target = weekDateByDay[dIdx];
-            if (target) {
-              selectedDate = target;
-              updateDateUI();
-              fetchDataForSelectedDate();
-              // Switch to trends tab
-              tabs.forEach(t => t.classList.remove('active'));
-              views.forEach(v => v.classList.remove('active'));
-              document.querySelector('[data-view="trends"]').classList.add('active');
-              document.getElementById('view-trends').classList.add('active');
-            }
-          });
-        } else {
-          cell.title = '';
+          cell.style.opacity = String(Math.min(0.15 + (value / max) * 0.85, 1));
+          cell.title = `${DAY_LONG[dayIndex]} ${formatHour(hour)} — ${formatTime(value)}`;
         }
-
         grid.appendChild(cell);
-      }
-    });
-
-    // Empty state hint — remove any previous one first
-    const existingHint = document.getElementById('heatmap-empty-hint');
-    if (existingHint) existingHint.remove();
-    if (heatmapSection) heatmapSection.classList.toggle('is-empty', !hasAnyData);
-
-    if (!hasAnyData) {
-      const hint = document.createElement('div');
-      hint.id = 'heatmap-empty-hint';
-      hint.className = 'heatmap-empty-state';
-      hint.textContent = 'No tracked activity in this week.';
-      xAxis.after(hint);
-    }
-
-    // ── Patterns, Anomalies, Recs, Correlations ──
-    let recentSessions = [];
-    dateKeys.forEach(dk => {
-      const dData = allData[dk] && Array.isArray(allData[dk].sessions) ? allData[dk] : { sessions: [] };
-      if (!dData || !dData.sessions) return;
-      dData.sessions.forEach(s => {
-        if (s.start && s.end) recentSessions.push(s);
       });
     });
 
-    const totalRecentTime = recentSessions.reduce((sum, s) => sum + s.duration, 0);
-    const focusedRecent = recentSessions.reduce((sum, s) => sum + (classifySession(s) === 'focused' ? s.duration : 0), 0);
-    const distractedRecent = recentSessions.reduce((sum, s) => sum + (classifySession(s) === 'distracted' ? s.duration : 0), 0);
-    const avgSessionSeconds = recentSessions.length ? Math.round(totalRecentTime / recentSessions.length) : 0;
-    const longSessionsCount = recentSessions.filter(s => s.duration >= 25 * 60).length;
-    const quickChecksCount = recentSessions.filter(s => s.duration <= 3 * 60).length;
-    const focusSharePct = totalRecentTime ? Math.round((focusedRecent / totalRecentTime) * 100) : 0;
-    const distractionSharePct = totalRecentTime ? Math.round((distractedRecent / totalRecentTime) * 100) : 0;
-    const recentHourBuckets = new Array(24).fill(0);
-    recentSessions.forEach((session) => {
-      let cursor = new Date(session.start);
-      const endDate = new Date(session.end);
-      while (cursor < endDate) {
-        const hr = cursor.getHours();
-        const endOfHour = new Date(cursor);
-        endOfHour.setMinutes(59, 59, 999);
-        const sliceEnd = endOfHour < endDate ? endOfHour : endDate;
-        recentHourBuckets[hr] += Math.max(0, (sliceEnd - cursor) / 1000);
-        cursor = new Date(endOfHour.getTime() + 1);
-      }
+    const axis = el('div', 'heatmap-axis');
+    for (let hour = 0; hour < 24; hour += 3) {
+      const marker = el('span', null, formatHour(hour));
+      marker.style.gridColumn = 'span 3';
+      axis.appendChild(marker);
+    }
+
+    const legend = el('div', 'heatmap-legend');
+    legend.append(el('span', null, 'less'), el('div', 'heatmap-gradient'), el('span', null, 'more'));
+
+    container.append(grid, axis, legend);
+  }
+
+  function renderCalendar(container, list) {
+    const totals = {};
+    list.forEach((session) => {
+      totals[session._dateKey] = (totals[session._dateKey] || 0) + (session.duration || 0);
     });
-    let insightsPeakHour = 0;
-    for (let h = 1; h < 24; h++) {
-      if (recentHourBuckets[h] > recentHourBuckets[insightsPeakHour]) insightsPeakHour = h;
-    }
 
-    const patternsGrid = document.getElementById('patterns-grid');
-    if (patternsGrid) {
-      patternsGrid.textContent = '';
-      const patternItems = [
-        { label: 'Focus share', value: `${focusSharePct}%`, desc: `Of your last 28 days of tracked time, ${formatTime(focusedRecent)} landed in focused work.` },
-        { label: 'Avg session', value: formatTime(avgSessionSeconds), desc: `Typical working bursts are around ${formatTime(avgSessionSeconds)} before context changes or stops.` },
-        { label: 'Deep sessions', value: longSessionsCount, desc: `${longSessionsCount} sessions lasted at least 25 minutes, which is a good signal for sustained attention.` },
-        { label: 'Quick checks', value: quickChecksCount, desc: `${quickChecksCount} sessions were under 3 minutes, which usually points to inbox or tab-check behavior.` }
-      ];
-      patternItems.forEach(item => {
-        const box = document.createElement('div');
-        box.className = 'corr-box';
-        const label = document.createElement('span');
-        label.className = 'corr-label';
-        label.textContent = item.label;
-        const value = document.createElement('div');
-        value.className = 'corr-val';
-        value.textContent = String(item.value);
-        const desc = document.createElement('div');
-        desc.className = 'corr-desc';
-        desc.textContent = item.desc;
-        box.append(label, value, desc);
-        patternsGrid.appendChild(box);
-      });
-    }
+    const keys = scopeKeys();
+    const max = Math.max(...Object.values(totals), 1);
+    const today = todayKey();
 
-    const anomaliesList = document.getElementById('anomalies-list');
-    if (anomaliesList) {
-      anomaliesList.textContent = '';
-      const anomalyItems = [];
-      if (todayTotal > sevenDayAvg * 1.5 && sevenDayAvg > 0) {
-        anomalyItems.push(`Today is running hot at ${formatTime(todayTotal)}, which is well above your recent daily average of ${formatTime(Math.round(sevenDayAvg))}.`);
-      }
-      if (switchCount >= Math.max(12, Math.round(recentSessions.length * 0.35))) {
-        anomalyItems.push(`Switching is elevated today with ${switchCount} context changes, so your attention may be more fragmented than usual.`);
-      }
-      if (distractionSharePct >= 45) {
-        anomalyItems.push(`Distracted time is taking ${distractionSharePct}% of your recent tracked time, which is high enough to noticeably affect deep work.`);
-      }
-      if (anomalyItems.length === 0) {
-        anomalyItems.push('No major anomalies stand out right now. Your recent time distribution looks fairly stable.');
-      }
-      anomalyItems.forEach(text => {
-        const row = document.createElement('div');
-        row.className = 'rec-item';
-        row.textContent = text;
-        anomaliesList.appendChild(row);
-      });
-    }
+    const grid = el('div', 'calendar');
+    DAY_SHORT.forEach(name => grid.appendChild(el('div', 'calendar-head', name)));
 
-    const recList = document.getElementById('recommendations-list');
-    if (recList) {
-      recList.textContent = '';
-      const recommendations = [];
-      if (switchCount > 0 && recentHourBuckets[insightsPeakHour] > 0) {
-        const peakHourLabel = `${insightsPeakHour % 12 === 0 ? 12 : insightsPeakHour % 12}${insightsPeakHour >= 12 ? 'PM' : 'AM'}`;
-        recommendations.push(`Protect the hour around ${peakHourLabel}, since that is your strongest recurring work window.`);
-      }
-      if (quickChecksCount > longSessionsCount) {
-        recommendations.push('You have more quick checks than deep sessions recently. Batching low-value checks into fixed windows would likely improve focus.');
-      }
-      if (focusSharePct < 50) {
-        recommendations.push('Focused time is below half of your tracked time. Tagging a few high-value domains as productive will also sharpen the timeline and insights.');
-      } else {
-        recommendations.push('Your focused share is healthy. Try nudging one more session per day past 25 minutes to compound that progress.');
-      }
-      if (recommendations.length === 0) {
-        recommendations.push('Track a few more sessions to unlock tailored recommendations.');
-      }
-      recommendations.slice(0, 3).forEach(text => {
-        const row = document.createElement('div');
-        row.className = 'rec-item';
-        row.textContent = text;
-        recList.appendChild(row);
-      });
-    }
+    // Pad to the first weekday so columns line up with the header.
+    const firstWeekday = (parseKey(keys[0]).getDay() + 6) % 7;
+    for (let i = 0; i < firstWeekday; i++) grid.appendChild(el('div', 'calendar-pad'));
 
-    const corrGrid = document.getElementById('correlations-grid');
-    if (corrGrid) {
-      corrGrid.textContent = '';
-      let morningTime = 0, afternoonTime = 0, eveningTime = 0, nightTime = 0;
-      let longSessions = 0, shortSessions = 0;
-      let dayTotals = [0,0,0,0,0,0,0]; 
-      const pairings = {};
+    keys.forEach((key) => {
+      const value = totals[key] || 0;
+      const cell = el('button', 'calendar-cell');
+      if (key > today) cell.classList.add('is-future');
+      if (key === today) cell.classList.add('is-today');
 
-      dateKeys.forEach(dk => {
-        const dData = allData[dk] && Array.isArray(allData[dk].sessions) ? allData[dk] : { sessions: [] };
-        if (!dData || !dData.sessions) return;
-        
-        const dateObj = new Date(dk);
-        if (isNaN(dateObj.getTime())) return;
-        const dayOfWeek = dateObj.getDay(); 
-        
-        for (let i = 0; i < dData.sessions.length; i++) {
-          const s = dData.sessions[i];
-          if (!s.domain || !s.start || !s.end) continue;
-          
-          const durMatch = s.end - s.start;
-          if (durMatch < 0) continue;
+      const bar = el('span', 'calendar-bar');
+      bar.style.height = value ? `${Math.max(8, (value / max) * 100)}%` : '0';
+      bar.style.backgroundColor = FOCUS_COLOR;
 
-          dayTotals[dayOfWeek] += durMatch;
-          
-          const hour = new Date(s.start).getHours();
-          if (hour >= 6 && hour < 12) morningTime += durMatch;
-          else if (hour >= 12 && hour < 18) afternoonTime += durMatch;
-          else if (hour >= 18 && hour < 24) eveningTime += durMatch;
-          else nightTime += durMatch;
-          
-          if (durMatch > 10 * 60) longSessions++;
-          else if (durMatch < 2 * 60) shortSessions++;
-          
-          if (i < dData.sessions.length - 1) {
-            const nextS = dData.sessions[i+1];
-            if (nextS.domain && s.domain !== nextS.domain) {
-              const timeDiff = nextS.start - s.end;
-              if (timeDiff >= 0 && timeDiff <= 120000) { 
-                const pair = `${s.domain} → ${nextS.domain}`;
-                pairings[pair] = (pairings[pair] || 0) + 1;
-              }
-            }
-          }
-        }
+      cell.append(el('span', 'calendar-date', String(parseKey(key).getDate())), bar);
+      cell.title = `${parseKey(key).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} — ${formatTime(value)}`;
+      cell.addEventListener('click', () => {
+        scope = { mode: 'day', anchor: key };
+        document.querySelectorAll('.scope-mode').forEach((button) => {
+          button.classList.toggle('active', button.dataset.scopeMode === 'day');
+        });
+        loadAndRender();
       });
 
-      const parts = [ {n:'Mornings', t:morningTime}, {n:'Afternoons', t:afternoonTime}, {n:'Evenings', t:eveningTime}, {n:'Late Nights', t:nightTime} ];
-      parts.sort((a,b) => b.t - a.t);
-      const bestPart = parts[0];
-      const avgOther = (parts[1].t + parts[2].t + parts[3].t) / 3 || 1;
-      const todPct = Math.round(((bestPart.t - avgOther) / avgOther) * 100);
+      grid.appendChild(cell);
+    });
 
-      const ratio = shortSessions > 0 ? (shortSessions / (longSessions||1)).toFixed(1) : 0;
-      
-      let bestDayIdx = 0;
-      for(let i=1; i<7; i++) if(dayTotals[i] > dayTotals[bestDayIdx]) bestDayIdx = i;
-      const fDayNames = ['Sundays', 'Mondays', 'Tuesdays', 'Wednesdays', 'Thursdays', 'Fridays', 'Saturdays'];
-      const avgDay = (dayTotals.reduce((a,b)=>a+b,0) - dayTotals[bestDayIdx]) / 6 || 1;
-      const dayVal = (dayTotals[bestDayIdx] / avgDay).toFixed(1);
+    container.appendChild(grid);
+  }
 
-      const sortedPairs = Object.entries(pairings).sort((a,b) => b[1] - a[1]);
-      const topPair = sortedPairs.length > 0 ? sortedPairs[0] : null;
+  function renderBlocks(list) {
+    const stats = $('switch-stats');
+    const container = $('session-blocks');
+    clear(stats);
+    clear(container);
 
-      const c1 = document.createElement('div'); c1.className = 'corr-box';
-      const c1Label = document.createElement('span'); c1Label.className = 'corr-label'; c1Label.textContent = 'Time of day';
-      const c1Val = document.createElement('div'); c1Val.className = 'corr-val'; c1Val.textContent = `↑ ${todPct > 0 ? todPct : 0}%`;
-      const c1Desc = document.createElement('div'); c1Desc.className = 'corr-desc';
-      c1Desc.appendChild(document.createTextNode('Most tracking consistently active during '));
-      const c1Strong = document.createElement('strong'); c1Strong.textContent = bestPart.n;
-      c1Desc.appendChild(c1Strong);
-      c1Desc.appendChild(document.createTextNode('.'));
-      c1.append(c1Label, c1Val, c1Desc);
+    if (!list.length) {
+      container.appendChild(emptyState('No blocks to show for this range.'));
+      return;
+    }
 
-      const c2 = document.createElement('div'); c2.className = 'corr-box';
-      const c2Label = document.createElement('span'); c2Label.className = 'corr-label'; c2Label.textContent = 'Session length';
-      const c2Val = document.createElement('div'); c2Val.className = 'corr-val'; c2Val.textContent = `↑ ${ratio}×`;
-      const c2Desc = document.createElement('div'); c2Desc.className = 'corr-desc';
-      c2Desc.appendChild(document.createTextNode('Sessions over '));
-      const c2Strong = document.createElement('strong'); c2Strong.textContent = '10 min';
-      c2Desc.appendChild(c2Strong);
-      c2Desc.appendChild(document.createTextNode(' have fewer site switches vs short ones.'));
-      c2.append(c2Label, c2Val, c2Desc);
+    const blocks = buildBlocks(list);
+    const switches = countSwitches(list);
 
-      const c3 = document.createElement('div'); c3.className = 'corr-box';
-      const c3Label = document.createElement('span'); c3Label.className = 'corr-label'; c3Label.textContent = 'Day of week';
-      const c3Val = document.createElement('div'); c3Val.className = 'corr-val'; c3Val.textContent = `↑ ${dayVal}×`;
-      const c3Desc = document.createElement('div'); c3Desc.className = 'corr-desc';
-      c3Desc.appendChild(document.createTextNode('You track more time on '));
-      const c3Strong = document.createElement('strong'); c3Strong.textContent = fDayNames[bestDayIdx];
-      c3Desc.appendChild(c3Strong);
-      c3Desc.appendChild(document.createTextNode(' than average.'));
-      c3.append(c3Label, c3Val, c3Desc);
+    // The count is measured. There is deliberately no "cost of switching" figure
+    // derived from it — the resumption times in the literature describe
+    // interrupted tasks, not tab switches, and a tab switch is often the work.
+    stats.append(
+      el('strong', null, String(switches)),
+      document.createTextNode(` site switch${switches === 1 ? '' : 'es'} across ${blocks.length} block${blocks.length === 1 ? '' : 's'} of activity.`)
+    );
 
-      const c4 = document.createElement('div'); c4.className = 'corr-box';
-      const c4Label = document.createElement('span'); c4Label.className = 'corr-label'; c4Label.textContent = 'Site pairing';
-      const c4Val = document.createElement('div'); c4Val.className = 'corr-val'; c4Val.style.fontSize = '18px'; c4Val.textContent = topPair ? topPair[0] : 'None yet';
-      const c4Desc = document.createElement('div'); c4Desc.className = 'corr-desc';
-      if (topPair) {
-        c4Desc.appendChild(document.createTextNode('Opening the first site predicts visiting the second within '));
-        const c4Strong = document.createElement('strong'); c4Strong.textContent = '2 minutes';
-        c4Desc.appendChild(c4Strong);
-        c4Desc.appendChild(document.createTextNode(`, ${Math.min(99, Math.round(50 + (topPair[1]*5)))}% of the time.`));
-      } else {
-        c4Desc.textContent = 'Keep browsing to generate pairings.';
+    blocks
+      .sort((a, b) => b.duration - a.duration)
+      .slice(0, 12)
+      .forEach((block) => {
+        const [dominant] = Object.entries(block.weights).sort((a, b) => b[1] - a[1]);
+        const label = dominant && dominant[1] > 0 ? dominant[0] : 'untagged';
+
+        const card = el('div', 'block-card');
+        const head = el('div', 'block-head');
+        head.append(
+          el('span', 'block-title', block.domains.length === 1 ? block.domains[0] : `${block.domains.length} sites`),
+          el('span', 'block-duration', formatTime(block.duration))
+        );
+
+        const tag = el('span', 'block-tag', LABEL_NAMES[label] || 'Untagged');
+        tag.style.color = labelColor(label === 'untagged' ? null : label);
+        tag.style.borderColor = labelColor(label === 'untagged' ? null : label);
+
+        card.append(
+          head,
+          el('div', 'block-meta',
+            `${formatClockTime(block.start)} – ${formatClockTime(block.end)} · ${block.switches} switch${block.switches === 1 ? '' : 'es'}`),
+          tag
+        );
+        container.appendChild(card);
+      });
+  }
+
+  // ═══ Review ═══
+
+  const reviewModal = $('review-modal');
+
+  function reviewWeekKeys() {
+    const monday = shiftKey(mondayOf(todayKey()), -reviewWeekOffset * 7);
+    return Array.from({ length: 7 }, (_, i) => shiftKey(monday, i));
+  }
+
+  function openReview() {
+    reviewModal.classList.add('open');
+    reviewModal.setAttribute('aria-hidden', 'false');
+    renderReview();
+  }
+
+  function closeReview() {
+    reviewModal.classList.remove('open');
+    reviewModal.setAttribute('aria-hidden', 'true');
+  }
+
+  async function renderReview() {
+    const keys = reviewWeekKeys();
+    const previousKeys = Array.from({ length: 7 }, (_, i) => shiftKey(keys[0], i - 7));
+
+    const [weekSessions, previousSessions] = await Promise.all([
+      fetchSessions(keys),
+      fetchSessions(previousKeys)
+    ]);
+
+    $('review-range').textContent =
+      `${parseKey(keys[0]).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ` +
+      `${parseKey(keys[6]).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+    $('review-next').disabled = reviewWeekOffset === 0;
+
+    const totalsByDay = keys.map(key => totalOf(weekSessions.filter(session => session._dateKey === key)));
+    const total = totalsByDay.reduce((sum, value) => sum + value, 0);
+    const previousTotal = totalOf(previousSessions);
+    const activeDays = totalsByDay.filter(value => value > 0).length;
+    const peakIndex = totalsByDay.reduce((best, value, index) => value > totalsByDay[best] ? index : best, 0);
+
+    const statsWrap = $('review-stats');
+    clear(statsWrap);
+
+    [
+      ['Total', formatTime(total), previousTotal > 0 ? total - previousTotal : null],
+      ['Daily average', formatTime(activeDays ? total / activeDays : 0), null],
+      ['Active days', `${activeDays} / 7`, null],
+      ['Busiest', totalsByDay[peakIndex] > 0 ? DAY_LONG[peakIndex] : '—', null]
+    ].forEach(([label, value, delta]) => {
+      const cell = el('div', 'digest-stat');
+      cell.append(el('span', 'digest-stat-label', label), el('span', 'digest-stat-value', value));
+      if (delta !== null) {
+        cell.appendChild(el('span', `digest-stat-delta ${delta > 0 ? 'up' : delta < 0 ? 'down' : 'same'}`,
+          delta === 0 ? 'same as last week' : `${delta > 0 ? '↑' : '↓'} ${formatTime(Math.abs(delta))} vs last week`));
       }
-      c4.append(c4Label, c4Val, c4Desc);
+      statsWrap.appendChild(cell);
+    });
 
-      corrGrid.append(c1, c2, c3, c4);
+    const daysWrap = $('review-days');
+    clear(daysWrap);
+    const maxDay = Math.max(...totalsByDay, 1);
+    const today = todayKey();
+
+    keys.forEach((key, index) => {
+      const row = el('div', 'day-row');
+      row.appendChild(el('div', `day-label${key === today ? ' is-today' : ''}`, DAY_SHORT[index]));
+
+      const track = el('div', 'day-bar-track');
+      const fill = el('div', `day-bar-fill${key === today ? ' today' : ''}`);
+      fill.style.width = `${(totalsByDay[index] / maxDay) * 100}%`;
+      track.appendChild(fill);
+      row.appendChild(track);
+
+      row.appendChild(el('div', `day-time${key === today ? ' is-today' : ''}`,
+        totalsByDay[index] > 0 ? formatTime(totalsByDay[index]) : (key > today ? '' : '—')));
+      daysWrap.appendChild(row);
+    });
+
+    renderInbox(weekSessions);
+    renderReviewNotable();
+    await renderReflection(keys[0]);
+  }
+
+  // The highest-leverage surface in the app: every derived number is only as
+  // good as label coverage, and this is where coverage gets fixed in one pass.
+  function renderInbox(weekSessions) {
+    const intro = $('review-inbox-intro');
+    const container = $('review-inbox');
+    clear(container);
+
+    const untagged = weekSessions.filter(session => !labelOf(session));
+    if (!untagged.length) {
+      intro.textContent = 'Everything this week is labelled.';
+      return;
+    }
+
+    const grouped = {};
+    untagged.forEach((session) => {
+      const entry = grouped[session.domain] || (grouped[session.domain] = { domain: session.domain, duration: 0 });
+      entry.duration += session.duration || 0;
+    });
+
+    const rows = Object.values(grouped).sort((a, b) => b.duration - a.duration);
+    intro.textContent = `${formatTime(totalOf(untagged))} across ${rows.length} site${rows.length === 1 ? '' : 's'}. ` +
+      'Setting a default here labels the site everywhere, including in your history.';
+
+    rows.forEach((entry) => {
+      const row = el('div', 'inbox-row');
+      const name = el('span', 'inbox-name', entry.domain);
+      name.title = entry.domain;
+
+      const buttons = el('div', 'inbox-buttons');
+      VALID_LABELS.forEach((label) => {
+        const button = el('button', 'inbox-btn', LABEL_NAMES[label]);
+        button.style.setProperty('--inbox-color', labelColor(label));
+        button.addEventListener('click', async () => {
+          const existing = (labelRules[entry.domain] || []).filter(ruleIsConditional);
+          labelRules[entry.domain] = [...existing, { label, when: {} }];
+          await saveLabelRules();
+          row.remove();
+          renderHome();
+          renderWhere();
+          if (!container.children.length) intro.textContent = 'Everything this week is labelled.';
+        });
+        buttons.appendChild(button);
+      });
+
+      row.append(domainBadge(entry.domain, 18), name, el('span', 'inbox-amount', formatTime(entry.duration)), buttons);
+      container.appendChild(row);
+    });
+  }
+
+  function renderReviewNotable() {
+    const container = $('review-notable');
+    clear(container);
+
+    if (!deviations.length) {
+      container.appendChild(el('p', 'rule-empty', 'Nothing sits outside your normal range right now.'));
+      return;
+    }
+
+    deviations.slice(0, 4).forEach((deviation) => {
+      const row = el('div', 'notable-row');
+      row.append(
+        domainBadge(deviation.domain, 18),
+        el('span', 'notable-name', deviation.domain),
+        el('span', 'notable-meta', deviation.kind === 'new'
+          ? `new — no history in the last ${DEVIATION_WINDOW_DAYS} days`
+          : `${formatTime(deviation.total)} today against a typical ${formatTime(deviation.median)}`)
+      );
+      container.appendChild(row);
+    });
+  }
+
+  let reflectionTimer = null;
+
+  async function renderReflection(weekStartKey) {
+    const stored = await browser.storage.local.get('reflections');
+    const reflections = stored.reflections || {};
+    const existing = reflections[weekStartKey];
+
+    // Stable per week rather than random, so returning to a week shows the same
+    // question you answered.
+    const index = weekStartKey.split('-').reduce((sum, part) => sum + Number(part), 0) % REFLECTION_QUESTIONS.length;
+    $('review-question').textContent = REFLECTION_QUESTIONS[index];
+
+    const input = $('review-reflection');
+    input.value = existing ? existing.text : '';
+    $('review-saved').textContent = existing
+      ? `Saved ${new Date(existing.savedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+      : '';
+
+    input.oninput = () => {
+      clearTimeout(reflectionTimer);
+      reflectionTimer = setTimeout(async () => {
+        const latest = await browser.storage.local.get('reflections');
+        const next = latest.reflections || {};
+        const text = input.value.trim();
+        if (text) next[weekStartKey] = { text, savedAt: Date.now() };
+        else delete next[weekStartKey];
+        await browser.storage.local.set({ reflections: next });
+        $('review-saved').textContent = text ? 'Saved' : '';
+      }, 600);
+    };
+  }
+
+  // ═══ Project modal ═══
+
+  const projectModal = $('add-project-modal');
+  let editingProject = null;
+  let projectDirectionChoice = 'floor';
+
+  function openProjectModal(existingName = null) {
+    editingProject = existingName;
+    $('add-project-title').textContent = existingName ? `Edit ${existingName}` : 'New project';
+    $('new-project-name').value = existingName || '';
+    $('new-project-domain').value = '';
+    $('new-project-goal').value = existingName && projectGoals[existingName]
+      ? String(projectGoals[existingName] / 3600)
+      : '';
+    projectDirectionChoice = existingName ? projectDirection(existingName) : 'floor';
+    document.querySelectorAll('#new-project-direction .seg-btn').forEach((button) => {
+      button.classList.toggle('active', button.dataset.direction === projectDirectionChoice);
+    });
+    $('btn-save-project').textContent = existingName ? 'Save project' : 'Create project';
+    $('project-form-error').hidden = true;
+    projectModal.classList.add('open');
+    projectModal.setAttribute('aria-hidden', 'false');
+    $('new-project-name').focus();
+  }
+
+  function closeProjectModal() {
+    projectModal.classList.remove('open');
+    projectModal.setAttribute('aria-hidden', 'true');
+    editingProject = null;
+  }
+
+  function normalizeDomainInput(value) {
+    const raw = value.trim().toLowerCase();
+    if (!raw) return '';
+    try {
+      return new URL(raw.includes('://') ? raw : `https://${raw}`).hostname.replace(/^www\./, '');
+    } catch (error) {
+      return raw.replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
     }
   }
 
-  // ─── Init ───
-  updateDateUI();
-  fetchDataForSelectedDate();
+  // ═══ Settings ═══
 
-  browser.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local') {
-      const today = getTodayString();
-      if (selectedDate === today && changes[today]) {
-        currentData = changes[today].newValue && Array.isArray(changes[today].newValue.sessions)
-          ? changes[today].newValue
-          : { sessions: [] };
-        currentData.sessions = preprocessSessions(currentData.sessions);
-        renderDashboard();
-      }
-      if (changes.projectMappings) {
-        projectsMap = changes.projectMappings.newValue || projectsMap;
-        renderProjects(currentData.sessions || []);
-      }
-      if (changes.projectGoals) {
-        projectGoals = changes.projectGoals.newValue || {};
-        renderProjects(currentData.sessions || []);
-      }
-      if (changes.activeProjectFocus) {
-        activeProjectFocus = changes.activeProjectFocus.newValue || null;
-        renderProjects(currentData.sessions || []);
-      }
-      if (changes.productivityLabels) {
-        productivityLabels = changes.productivityLabels.newValue || {};
-        renderDashboard();
-      }
-      if (changes.energyTags) {
-        energyTags = changes.energyTags.newValue || {};
-        renderTimeline(currentData.sessions || []);
-      }
+  const settingsModal = $('settings-modal');
+
+  function closeSettings() {
+    settingsModal.classList.remove('open');
+    settingsModal.setAttribute('aria-hidden', 'true');
+  }
+
+  function renderLastExport(timestamp) {
+    $('last-export-hint').textContent = timestamp
+      ? `Last export: ${new Date(timestamp).toLocaleString()}`
+      : 'Last export: never';
+  }
+
+  function download(content, filename, type) {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+
+    const now = Date.now();
+    renderLastExport(now);
+    browser.storage.local.set({ lastExportAt: now }).catch(console.warn);
+  }
+
+  // Rolls old days into per-domain daily totals. Every total stays exact; what
+  // goes is the individual visit times, which you can no longer act on anyway.
+  async function compactHistory() {
+    const cutoff = shiftKey(todayKey(), -COMPACT_AFTER_DAYS);
+    const keys = (await listDayKeys()).filter(key => key < cutoff);
+    if (!keys.length) return { days: 0 };
+
+    const stored = await browser.storage.local.get(keys);
+    const writes = {};
+    let compacted = 0;
+
+    keys.forEach((key) => {
+      const day = stored[key];
+      if (!day || day.compacted || !Array.isArray(day.sessions)) return;
+
+      const totals = {};
+      day.sessions.forEach((session) => {
+        if (!session.domain) return;
+        const entry = totals[session.domain] || (totals[session.domain] = { duration: 0, visits: 0 });
+        entry.duration += session.duration || 0;
+        entry.visits += 1;
+        const label = normalizeLabel(session.productivityLabel);
+        if (label && !entry.label) entry.label = label;
+      });
+
+      writes[key] = { compacted: true, totals };
+      compacted++;
+    });
+
+    if (compacted) await browser.storage.local.set(writes);
+    return { days: compacted };
+  }
+
+  async function importJson(file) {
+    let parsed;
+    try {
+      parsed = JSON.parse(await file.text());
+    } catch (error) {
+      alert('That file is not valid JSON. Only a Flow Tracker JSON export can be imported.');
+      return;
     }
+
+    if (!parsed || typeof parsed !== 'object') {
+      alert('That file is not a Flow Tracker export.');
+      return;
+    }
+
+    const dayKeys = Object.keys(parsed).filter(isDayKey);
+    if (!dayKeys.length) {
+      alert('No tracked days found in that file. Only a Flow Tracker JSON export can be imported.');
+      return;
+    }
+
+    const confirmed = confirm(
+      `Import ${dayKeys.length} day${dayKeys.length === 1 ? '' : 's'} of history?\n\n` +
+      'Days already present are merged — visits that exist in both are not duplicated. ' +
+      'Projects, rules and preferences in the file are ignored, so your current setup is kept.'
+    );
+    if (!confirmed) return;
+
+    const existing = await browser.storage.local.get(dayKeys);
+    const writes = {};
+
+    dayKeys.forEach((key) => {
+      const incoming = parsed[key];
+      if (!incoming || !Array.isArray(incoming.sessions)) return;
+
+      const current = existing[key] && Array.isArray(existing[key].sessions) ? existing[key].sessions : [];
+      const seen = new Set(current.map(session => `${session.domain}|${session.start}|${session.end}`));
+      const added = incoming.sessions.filter((session) => {
+        const signature = `${session.domain}|${session.start}|${session.end}`;
+        if (seen.has(signature)) return false;
+        seen.add(signature);
+        return true;
+      });
+
+      writes[key] = { sessions: [...current, ...added].sort((a, b) => a.start - b.start) };
+    });
+
+    const count = Object.keys(writes).length;
+    await browser.storage.local.set(writes);
+    dayKeyCache = null;
+    alert(`Imported ${count} day${count === 1 ? '' : 's'}.`);
+    await loadAndRender();
+  }
+
+  // ═══ Render ═══
+
+  function renderAll() {
+    $('scope-label').textContent = scopeLabel();
+    $('scope-next').disabled = atLatestScope();
+    $('scope-prev').disabled = scope.mode === 'all';
+
+    renderHome();
+    renderWhere();
+    renderWhen();
+    if (openDetailDomain) renderDetail();
+  }
+
+  // ═══ Wiring ═══
+
+  const storageInit = await browser.storage.local.get([
+    'labelRules', 'productivityLabels', 'projectMappings', 'projectGoals', 'projectMeta',
+    'plans', 'speedBumpSites', 'activeProjectFocus', 'darkMode', 'themePrefs',
+    'notificationPrefs', 'trackingPrefs', 'lastExportAt'
+  ]);
+
+  projectsMap = storageInit.projectMappings || {};
+  projectGoals = storageInit.projectGoals || {};
+  projectMeta = storageInit.projectMeta || {};
+  plans = storageInit.plans || {};
+  speedBumpSites = storageInit.speedBumpSites || {};
+  activeProjectFocus = storageInit.activeProjectFocus || null;
+
+  // Migrate the flat domain -> label map if the background script has not
+  // already done it this session.
+  if (storageInit.labelRules) {
+    labelRules = storageInit.labelRules;
+  } else {
+    labelRules = {};
+    Object.entries(storageInit.productivityLabels || {}).forEach(([domain, label]) => {
+      const normalized = normalizeLabel(label);
+      if (normalized) labelRules[domain] = [{ label: normalized, when: {} }];
+    });
+    await browser.storage.local.set({ labelRules });
+  }
+
+  if (storageInit.darkMode || (storageInit.themePrefs && storageInit.themePrefs.darkMode)) {
+    document.documentElement.classList.add('dark-theme');
+  }
+
+  refreshThemeColors();
+
+  // Tabs
+  document.querySelectorAll('.tab').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(other => other.classList.remove('active'));
+      document.querySelectorAll('.view-content').forEach(view => view.classList.remove('active'));
+      tab.classList.add('active');
+      $(`view-${tab.dataset.view}`).classList.add('active');
+    });
   });
 
-  setInterval(() => {
-    if (selectedDate === getTodayString()) fetchDataForSelectedDate();
-  }, 10000);
-
-  setInterval(() => {
-    updateProjectFocusClock();
-  }, 1000);
-
-  document.addEventListener('keydown', e => {
-    if (e.key === 'ArrowLeft') shiftDate(-1);
-    else if (e.key === 'ArrowRight') shiftDate(1);
+  // Scope
+  document.querySelectorAll('.scope-mode').forEach((button) => {
+    button.addEventListener('click', () => setScopeMode(button.dataset.scopeMode));
   });
+  $('scope-prev').addEventListener('click', () => shiftScope(-1));
+  $('scope-next').addEventListener('click', () => shiftScope(1));
+
+  // Where controls — all operate on already-loaded data, no storage reads.
+  document.querySelectorAll('#where-filters .filter-pill').forEach((pill) => {
+    pill.addEventListener('click', () => {
+      document.querySelectorAll('#where-filters .filter-pill').forEach(other => other.classList.remove('active'));
+      pill.classList.add('active');
+      whereFilter = pill.dataset.filter;
+      renderWhere();
+    });
+  });
+
+  $('where-group').addEventListener('change', (event) => {
+    whereGroup = event.target.value;
+    renderWhere();
+  });
+
+  $('where-sort').addEventListener('change', (event) => {
+    whereSort = event.target.value;
+    renderWhere();
+  });
+
+  // Drawer
+  $('drawer-close').addEventListener('click', closeDrawer);
+  drawer.addEventListener('click', (event) => {
+    if (event.target === drawer) closeDrawer();
+  });
+
+  // Review
+  $('review-btn').addEventListener('click', () => { reviewWeekOffset = 0; openReview(); });
+  $('review-close').addEventListener('click', closeReview);
+  $('review-prev').addEventListener('click', () => { reviewWeekOffset++; renderReview(); });
+  $('review-next').addEventListener('click', () => {
+    if (reviewWeekOffset === 0) return;
+    reviewWeekOffset--;
+    renderReview();
+  });
+  reviewModal.addEventListener('click', (event) => {
+    if (event.target === reviewModal) closeReview();
+  });
+
+  // Settings
+  $('settings-btn').addEventListener('click', () => {
+    settingsModal.classList.add('open');
+    settingsModal.setAttribute('aria-hidden', 'false');
+  });
+  $('settings-close').addEventListener('click', closeSettings);
+  settingsModal.addEventListener('click', (event) => {
+    if (event.target === settingsModal) closeSettings();
+  });
+
+  $('settings-version').textContent = `Flow Tracker v${browser.runtime.getManifest().version}`;
+  renderLastExport(storageInit.lastExportAt);
+
+  // Preferences
+  const notificationPrefs = {
+    budgetAlerts: storageInit.notificationPrefs?.budgetAlerts ?? true,
+    deviationAlerts: storageInit.notificationPrefs?.deviationAlerts ?? false
+  };
+  const trackingPrefs = {
+    idleDetection: storageInit.trackingPrefs?.idleDetection ?? true,
+    idleThresholdSeconds: storageInit.trackingPrefs?.idleThresholdSeconds ?? 180,
+    ignoreIdleWhenPlaying: storageInit.trackingPrefs?.ignoreIdleWhenPlaying ?? true
+  };
+
+  $('budget-alerts-toggle').checked = notificationPrefs.budgetAlerts;
+  $('deviation-alerts-toggle').checked = notificationPrefs.deviationAlerts;
+  $('idle-detection-toggle').checked = trackingPrefs.idleDetection;
+  $('ignore-idle-playing-toggle').checked = trackingPrefs.ignoreIdleWhenPlaying;
+  $('idle-threshold').value = String(trackingPrefs.idleThresholdSeconds);
+  $('idle-threshold').disabled = !trackingPrefs.idleDetection;
+  $('dark-mode-toggle').checked = document.documentElement.classList.contains('dark-theme');
+
+  async function saveNotificationPrefs(next) {
+    Object.assign(notificationPrefs, next);
+    await browser.storage.local.set({ notificationPrefs: { ...notificationPrefs } });
+  }
+
+  async function saveTrackingPrefs(next) {
+    Object.assign(trackingPrefs, next);
+    $('idle-threshold').disabled = !trackingPrefs.idleDetection;
+    await browser.storage.local.set({ trackingPrefs: { ...trackingPrefs } });
+    try {
+      await browser.runtime.sendMessage({ action: 'syncTrackingPrefs' });
+    } catch (error) {
+      console.warn('Failed to sync tracking prefs:', error);
+    }
+  }
+
+  $('budget-alerts-toggle').addEventListener('change', e => saveNotificationPrefs({ budgetAlerts: e.target.checked }));
+  $('deviation-alerts-toggle').addEventListener('change', e => saveNotificationPrefs({ deviationAlerts: e.target.checked }));
+  $('idle-detection-toggle').addEventListener('change', e => saveTrackingPrefs({ idleDetection: e.target.checked }));
+  $('ignore-idle-playing-toggle').addEventListener('change', e => saveTrackingPrefs({ ignoreIdleWhenPlaying: e.target.checked }));
+  $('idle-threshold').addEventListener('change', e => saveTrackingPrefs({ idleThresholdSeconds: Number(e.target.value) || 180 }));
+
+  $('dark-mode-toggle').addEventListener('change', async (event) => {
+    document.documentElement.classList.toggle('dark-theme', event.target.checked);
+    // Charts paint with resolved colour values, so they have to be repainted
+    // when the palette underneath them changes.
+    refreshThemeColors();
+    renderAll();
+    await browser.storage.local.set({ darkMode: event.target.checked });
+  });
+
+  // Data actions
+  $('btn-export-json').addEventListener('click', async () => {
+    const all = await browser.storage.local.get(null);
+    download(JSON.stringify(all, null, 2), `flow_tracker_export_${Date.now()}.json`, 'application/json');
+  });
+
+  $('btn-export-csv').addEventListener('click', async () => {
+    const all = await browser.storage.local.get(null);
+    // Quote every field: an unescaped comma or quote in a domain would silently
+    // shift every following column in the exported file.
+    const cell = value => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    const rows = [['Date', 'Domain', 'Start', 'End', 'Duration (s)', 'Label'].map(cell).join(',')];
+
+    Object.keys(all).filter(isDayKey).sort().forEach((key) => {
+      expandDay(key, all[key]).forEach((session) => {
+        rows.push([
+          key,
+          session.domain,
+          session.synthetic ? '' : new Date(session.start).toISOString(),
+          session.synthetic ? '' : new Date(session.end).toISOString(),
+          session.duration,
+          labelOf(session) || 'untagged'
+        ].map(cell).join(','));
+      });
+    });
+
+    download(rows.join('\n') + '\n', `flow_tracker_export_${Date.now()}.csv`, 'text/csv');
+  });
+
+  $('btn-import-json').addEventListener('click', () => $('import-file').click());
+  $('import-file').addEventListener('change', async (event) => {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = '';
+    if (file) await importJson(file);
+  });
+
+  $('btn-compact').addEventListener('click', async () => {
+    const button = $('btn-compact');
+    button.disabled = true;
+    const result = await compactHistory();
+    button.disabled = false;
+    $('compact-hint').textContent = result.days
+      ? `Compacted ${result.days} day${result.days === 1 ? '' : 's'}.`
+      : `Nothing older than ${COMPACT_AFTER_DAYS} days to compact.`;
+    if (result.days) await loadAndRender();
+  });
+
+  $('clear-data-btn').addEventListener('click', async () => {
+    const range = $('clear-data-range').value;
+    const rangeText = range === 'all' ? 'all time' : `the last ${range} days`;
+    if (!confirm(`Clear tracking history for ${rangeText}? This cannot be undone.`)) return;
+
+    const keys = await listDayKeys();
+    let toRemove;
+
+    if (range === 'all') {
+      // Clear tracked history only. Projects, goals, rules and preferences are
+      // configuration, not history — wiping them here would be a nasty surprise.
+      toRemove = [...keys, 'activeSession', 'activeProjectFocus', 'notificationState'];
+    } else {
+      const earliest = shiftKey(todayKey(), -(parseInt(range, 10) - 1));
+      toRemove = keys.filter(key => key >= earliest);
+    }
+
+    await browser.storage.local.remove(toRemove);
+    dayKeyCache = null;
+    closeSettings();
+    await loadAndRender();
+  });
+
+  // Project modal
+  document.querySelector('.show-new-project-btn').addEventListener('click', () => openProjectModal());
+  $('add-project-close').addEventListener('click', closeProjectModal);
+  projectModal.addEventListener('click', (event) => {
+    if (event.target === projectModal) closeProjectModal();
+  });
+
+  document.querySelectorAll('#new-project-direction .seg-btn').forEach((button) => {
+    button.addEventListener('click', () => {
+      projectDirectionChoice = button.dataset.direction;
+      document.querySelectorAll('#new-project-direction .seg-btn').forEach((other) => {
+        other.classList.toggle('active', other === button);
+      });
+    });
+  });
+
+  $('btn-save-project').addEventListener('click', async () => {
+    const name = $('new-project-name').value.trim();
+    const domain = normalizeDomainInput($('new-project-domain').value);
+    const hours = Number($('new-project-goal').value.trim());
+    const error = $('project-form-error');
+
+    if (!name) {
+      error.textContent = 'Give the project a name.';
+      error.hidden = false;
+      return;
+    }
+    // No invented default. A goal the user never set should never drive a
+    // progress bar, a status pill, or a notification.
+    if (!(hours > 0)) {
+      error.textContent = 'Set a weekly goal in hours — it is what the progress bar measures against.';
+      error.hidden = false;
+      return;
+    }
+    if (!editingProject && !domain) {
+      error.textContent = 'Add at least one site so there is something to attribute.';
+      error.hidden = false;
+      return;
+    }
+
+    if (domain) projectsMap[domain] = name;
+    projectGoals[name] = Math.round(hours * 3600);
+    projectMeta[name] = { direction: projectDirectionChoice };
+
+    await browser.storage.local.set({ projectMappings: projectsMap, projectGoals, projectMeta });
+    closeProjectModal();
+    renderProjects();
+  });
+
+  // Keyboard
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      if (drawer.classList.contains('open')) return closeDrawer();
+      closeSettings();
+      closeProjectModal();
+      closeReview();
+      return;
+    }
+
+    // Don't hijack arrow keys while typing, or while a dialog has focus.
+    const target = event.target;
+    if (target && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;
+    if (event.metaKey || event.ctrlKey || event.altKey) return;
+    if (document.querySelector('.modal-overlay.open') || drawer.classList.contains('open')) return;
+
+    if (event.key === 'ArrowLeft') shiftScope(-1);
+    else if (event.key === 'ArrowRight') shiftScope(1);
+  });
+
+  // Live updates
+  browser.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+
+    if (Object.keys(changes).some(isDayKey)) {
+      dayKeyCache = null;
+      loadAndRender();
+      return;
+    }
+
+    if (changes.labelRules) {
+      labelRules = changes.labelRules.newValue || {};
+      renderHome();
+      renderWhere();
+      renderWhen();
+    }
+    if (changes.projectMappings) {
+      projectsMap = changes.projectMappings.newValue || {};
+      renderWhere();
+    }
+    if (changes.projectGoals) {
+      projectGoals = changes.projectGoals.newValue || {};
+      renderProjects();
+    }
+    if (changes.activeProjectFocus) {
+      activeProjectFocus = changes.activeProjectFocus.newValue || null;
+      renderProjects();
+    }
+    if (changes.plans) plans = changes.plans.newValue || {};
+  });
+
+  await loadAndRender();
 });
