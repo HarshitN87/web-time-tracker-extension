@@ -50,6 +50,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   let whereGroup = 'label';
   let whereSort = 'time';
   let openDetailDomain = null;
+  let openDetailLabel = null;
   let reviewWeekOffset = 0;
   let dayKeyCache = null;
 
@@ -392,42 +393,68 @@ document.addEventListener('DOMContentLoaded', async () => {
     return dayData.sessions.map(session => ({ ...session, _dateKey: dateKey }));
   }
 
+  // Rejoins a visit you interrupted. The key case is leaving a site and coming
+  // straight back: the detour lands between the two records, so comparing only
+  // against the immediately preceding record never merges them and the return
+  // reads as a second visit. This tracks the last record per domain instead, so
+  // an intervening site does not break the visit apart.
+  //
+  // Durations are summed rather than recomputed from start and end, so the time
+  // spent on the detour is never absorbed into this site's total. Because a
+  // merged session can then span other sessions, each keeps the real intervals
+  // it was built from in `segments`, and anything that buckets by clock time
+  // walks those rather than the outer span.
   function stitch(list) {
     const valid = list.filter(session => session.start && session.end);
     if (!valid.length) return [];
 
     valid.sort((a, b) => a.start - b.start);
+
     const merged = [];
-    let current = { ...valid[0] };
+    const lastOfDomain = new Map();
 
-    for (let i = 1; i < valid.length; i++) {
-      const next = valid[i];
-      const sameDomain = next.domain === current.domain;
-      const contiguous = (next.start - current.end) < STITCH_GAP_MS;
-      const bothReal = !current.synthetic && !next.synthetic;
+    valid.forEach((raw) => {
+      const previous = lastOfDomain.get(raw.domain);
+      const withinWindow = previous && (raw.start - previous.end) < STITCH_GAP_MS;
+      const bothReal = previous && !previous.synthetic && !raw.synthetic;
+      // Never merge across midnight. The background already splits a session at
+      // the day boundary so each day owns its own time; rejoining the halves
+      // would hand the whole thing to whichever day started it.
+      const sameDay = previous && previous._dateKey === raw._dateKey;
+      // Two visits the user deliberately labelled differently are two visits,
+      // whatever the gap between them.
+      const labelsClash = previous
+        && normalizeLabel(previous.productivityLabel)
+        && normalizeLabel(raw.productivityLabel)
+        && normalizeLabel(previous.productivityLabel) !== normalizeLabel(raw.productivityLabel);
 
-      if (sameDomain && contiguous && bothReal) {
-        current.end = Math.max(current.end, next.end);
-        // Sum the real tracked durations — never (end - start), which would
-        // silently absorb the idle gap between the two visits as tracked time.
-        current.duration = (current.duration || 0) + (next.duration || 0);
-        current.visits = (current.visits || 1) + (next.visits || 1);
-        if (next.ongoing) current.ongoing = true;
-        if (next.capped) current.capped = true;
-        if (next.productivityLabel && !current.productivityLabel) {
-          current.productivityLabel = next.productivityLabel;
+      if (withinWindow && bothReal && sameDay && !labelsClash) {
+        previous.end = Math.max(previous.end, raw.end);
+        previous.duration = (previous.duration || 0) + (raw.duration || 0);
+        previous.segments.push({ start: raw.start, end: raw.end });
+        if (raw.ongoing) previous.ongoing = true;
+        if (raw.capped) previous.capped = true;
+        if (raw.productivityLabel && !previous.productivityLabel) {
+          previous.productivityLabel = raw.productivityLabel;
         }
-        if (next.projectFocus && !current.projectFocus) {
-          current.projectFocus = next.projectFocus;
+        if (raw.projectFocus && !previous.projectFocus) {
+          previous.projectFocus = raw.projectFocus;
         }
-      } else {
-        merged.push(current);
-        current = { ...next };
+        return;
       }
-    }
 
-    merged.push(current);
-    return merged;
+      const entry = { ...raw, segments: [{ start: raw.start, end: raw.end }] };
+      merged.push(entry);
+      lastOfDomain.set(raw.domain, entry);
+    });
+
+    return merged.sort((a, b) => a.start - b.start);
+  }
+
+  // A stitched session's outer span can cover time that belongs to other sites,
+  // so anything measuring clock time reads the real intervals instead.
+  function segmentsOf(session) {
+    return session.segments || [{ start: session.start, end: session.end }];
   }
 
   async function fetchSessions(keys) {
@@ -513,31 +540,52 @@ document.addEventListener('DOMContentLoaded', async () => {
     return split;
   }
 
-  function byDomain(list) {
+  // One row per site per label. A site whose default is neutral but which has
+  // three sessions tagged productive appears in both groups, carrying only the
+  // time that belongs to each. Collapsing it to a single dominant label — as an
+  // earlier version did — made a session tag you had just set invisible in the
+  // group you set it for.
+  function domainLabelRows(list) {
+    const map = {};
+    list.forEach((session) => {
+      if (!session.domain) return;
+      const label = labelOf(session) || 'untagged';
+      const key = `${session.domain}::${label}`;
+      const entry = map[key] || (map[key] = {
+        domain: session.domain,
+        label,
+        duration: 0,
+        visits: 0,
+        capped: false
+      });
+      entry.duration += session.duration || 0;
+      entry.visits += session.visits || 1;
+      if (session.capped) entry.capped = true;
+    });
+    return Object.values(map);
+  }
+
+  // One row per site, every label folded together. Used when the grouping axis
+  // is the project rather than the label, so a site is not listed twice inside
+  // the same project.
+  function domainRows(list) {
     const map = {};
     list.forEach((session) => {
       if (!session.domain) return;
       const entry = map[session.domain] || (map[session.domain] = {
         domain: session.domain,
+        label: null,
         duration: 0,
         visits: 0,
-        labels: { productive: 0, neutral: 0, distracting: 0, untagged: 0 },
+        shares: { productive: 0, neutral: 0, distracting: 0, untagged: 0 },
         capped: false
       });
       entry.duration += session.duration || 0;
       entry.visits += session.visits || 1;
-      entry.labels[labelOf(session) || 'untagged'] += session.duration || 0;
+      entry.shares[labelOf(session) || 'untagged'] += session.duration || 0;
       if (session.capped) entry.capped = true;
     });
-
-    // A domain's group is whichever label holds most of its time — a site can
-    // legitimately be productive in the morning and a sink at night.
-    Object.values(map).forEach((entry) => {
-      const [top] = Object.entries(entry.labels).sort((a, b) => b[1] - a[1]);
-      entry.label = top && top[1] > 0 ? top[0] : 'untagged';
-    });
-
-    return map;
+    return Object.values(map);
   }
 
   function projectOf(session) {
@@ -549,18 +597,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     list.forEach((session) => {
       if (session.synthetic || !session.start || !session.end) return;
       const label = labelOf(session) || 'untagged';
-      let cursor = session.start;
-      while (cursor < session.end) {
-        const current = new Date(cursor);
-        const hour = current.getHours();
-        const hourEnd = new Date(current);
-        hourEnd.setMinutes(59, 59, 999);
-        const sliceEnd = Math.min(session.end, hourEnd.getTime() + 1);
-        const seconds = Math.max(0, Math.floor((sliceEnd - cursor) / 1000));
-        buckets[hour][label] += seconds;
-        buckets[hour].total += seconds;
-        cursor = sliceEnd;
-      }
+      segmentsOf(session).forEach((segment) => {
+        let cursor = segment.start;
+        while (cursor < segment.end) {
+          const current = new Date(cursor);
+          const hour = current.getHours();
+          const hourEnd = new Date(current);
+          hourEnd.setMinutes(59, 59, 999);
+          const sliceEnd = Math.min(segment.end, hourEnd.getTime() + 1);
+          const seconds = Math.max(0, Math.floor((sliceEnd - cursor) / 1000));
+          buckets[hour][label] += seconds;
+          buckets[hour].total += seconds;
+          cursor = sliceEnd;
+        }
+      });
     });
     return buckets;
   }
@@ -569,17 +619,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     const matrix = Array.from({ length: 7 }, () => new Array(24).fill(0));
     list.forEach((session) => {
       if (session.synthetic || !session.start || !session.end) return;
-      let cursor = session.start;
-      while (cursor < session.end) {
-        const current = new Date(cursor);
-        const weekday = (current.getDay() + 6) % 7; // Monday-first
-        const hour = current.getHours();
-        const hourEnd = new Date(current);
-        hourEnd.setMinutes(59, 59, 999);
-        const sliceEnd = Math.min(session.end, hourEnd.getTime() + 1);
-        matrix[weekday][hour] += Math.max(0, (sliceEnd - cursor) / 1000);
-        cursor = sliceEnd;
-      }
+      segmentsOf(session).forEach((segment) => {
+        let cursor = segment.start;
+        while (cursor < segment.end) {
+          const current = new Date(cursor);
+          const weekday = (current.getDay() + 6) % 7; // Monday-first
+          const hour = current.getHours();
+          const hourEnd = new Date(current);
+          hourEnd.setMinutes(59, 59, 999);
+          const sliceEnd = Math.min(segment.end, hourEnd.getTime() + 1);
+          matrix[weekday][hour] += Math.max(0, (sliceEnd - cursor) / 1000);
+          cursor = sliceEnd;
+        }
+      });
     });
     return matrix;
   }
@@ -733,22 +785,24 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
-    const domains = Object.values(byDomain(sessions));
+    const rows = whereGroup === 'project' ? domainRows(sessions) : domainLabelRows(sessions);
     const sortValue = entry => whereSort === 'visits' ? entry.visits : entry.duration;
-    const maxValue = Math.max(...domains.map(sortValue), 1);
+    const maxValue = Math.max(...rows.map(sortValue), 1);
 
     if (whereGroup === 'project') {
-      renderGroupedByProject(container, domains, maxValue, sortValue);
+      renderGroupedByProject(container, rows, maxValue, sortValue);
     } else {
-      renderGroupedByLabel(container, domains, maxValue, sortValue, total);
+      renderGroupedByLabel(container, rows, maxValue, sortValue, total);
     }
 
     renderProjects();
   }
 
-  function domainRow(entry, maxValue, sortValue, color) {
+  function domainRow(entry, maxValue, sortValue, color, labelFocus = null) {
     const row = el('button', 'where-row');
-    row.setAttribute('aria-label', `${entry.domain}, ${formatTime(entry.duration)}`);
+    row.setAttribute('aria-label', labelFocus
+      ? `${entry.domain}, ${formatTime(entry.duration)} ${labelFocus}`
+      : `${entry.domain}, ${formatTime(entry.duration)}`);
 
     const badge = domainBadge(entry.domain, 18);
     const name = el('span', 'where-row-name', entry.domain);
@@ -772,7 +826,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       row.appendChild(flag);
     }
 
-    row.addEventListener('click', () => openDetail(entry.domain));
+    // Opening from a label group scopes the drawer to that group's visits, so
+    // the sessions you see are the ones the row was counting.
+    row.addEventListener('click', () => openDetail(entry.domain, labelFocus));
     return row;
   }
 
@@ -807,7 +863,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       );
       container.appendChild(head);
 
-      members.forEach(entry => container.appendChild(domainRow(entry, maxValue, sortValue, group.color)));
+      members.forEach(entry => container.appendChild(domainRow(entry, maxValue, sortValue, group.color, group.key)));
     });
 
     if (!rendered) container.appendChild(emptyState('Nothing in this filter for the selected range.'));
@@ -816,7 +872,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   function renderGroupedByProject(container, domains, maxValue, sortValue) {
     const buckets = {};
     domains.forEach((entry) => {
-      if (whereFilter !== 'all' && entry.label !== whereFilter) return;
+      // Rows here fold every label together, so the filter asks whether the site
+      // has any time under that label rather than comparing a single label.
+      if (whereFilter !== 'all' && !entry.shares[whereFilter]) return;
       const name = projectsMap[entry.domain] || 'Unassigned';
       (buckets[name] = buckets[name] || []).push(entry);
     });
@@ -994,10 +1052,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     drawer.classList.remove('open');
     drawer.setAttribute('aria-hidden', 'true');
     openDetailDomain = null;
+    openDetailLabel = null;
   }
 
-  function openDetail(domain) {
+  function openDetail(domain, labelFocus = null) {
     openDetailDomain = domain;
+    openDetailLabel = labelFocus;
     drawer.classList.add('open');
     drawer.setAttribute('aria-hidden', 'false');
     renderDetail();
@@ -1011,17 +1071,29 @@ document.addEventListener('DOMContentLoaded', async () => {
     const title = $('drawer-title');
     clear(title);
     title.append(domainBadge(domain, 24), el('span', 'drawer-title-name', domain));
+    if (openDetailLabel) {
+      const chip = el('span', 'rule-chip', LABEL_NAMES[openDetailLabel] || 'Untagged');
+      chip.style.borderColor = labelColor(openDetailLabel === 'untagged' ? null : openDetailLabel);
+      chip.style.color = labelColor(openDetailLabel === 'untagged' ? null : openDetailLabel);
+      title.appendChild(chip);
+    }
 
     const body = $('drawer-body');
     clear(body);
 
-    const own = sessions.filter(session => session.domain === domain);
+    const all = sessions.filter(session => session.domain === domain);
+    // Scoped to the group the row came from, so the figures below are the ones
+    // that row was counting rather than the site's whole total.
+    const own = openDetailLabel
+      ? all.filter(session => (labelOf(session) || 'untagged') === openDetailLabel)
+      : all;
+
     const total = totalOf(own);
     const visits = own.reduce((sum, session) => sum + (session.visits || 1), 0);
 
     const stats = el('div', 'drawer-stats');
     [
-      [scopeLabel(), formatTime(total)],
+      [openDetailLabel ? `${LABEL_NAMES[openDetailLabel] || 'Untagged'} · ${scopeLabel().toLowerCase()}` : scopeLabel(), formatTime(total)],
       ['Share', `${pct(total, totalOf(sessions))}%`],
       ['Visits', String(visits)],
       ['Average visit', formatTime(visits ? total / visits : 0)]
@@ -1031,6 +1103,19 @@ document.addEventListener('DOMContentLoaded', async () => {
       stats.appendChild(cell);
     });
     body.appendChild(stats);
+
+    if (openDetailLabel && own.length !== all.length) {
+      const note = el('div', 'drawer-scope-note');
+      note.append(document.createTextNode(
+        `Showing the ${(LABEL_NAMES[openDetailLabel] || 'untagged').toLowerCase()} share only — ${formatTime(totalOf(all))} total across all labels. `));
+      const showAll = el('button', 'link-inline', 'See every visit');
+      showAll.addEventListener('click', () => {
+        openDetailLabel = null;
+        renderDetail();
+      });
+      note.appendChild(showAll);
+      body.appendChild(note);
+    }
 
     if (own.some(session => session.capped)) {
       body.appendChild(el('div', 'drawer-warning',
@@ -1046,7 +1131,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     body.appendChild(el('h5', 'drawer-section', 'Speed bump'));
     body.appendChild(buildSpeedBumpEditor(domain));
 
-    body.appendChild(el('h5', 'drawer-section', `Visits in ${scopeLabel().toLowerCase()}`));
+    body.appendChild(el('h5', 'drawer-section', openDetailLabel
+      ? `${LABEL_NAMES[openDetailLabel] || 'Untagged'} visits in ${scopeLabel().toLowerCase()}`
+      : `Visits in ${scopeLabel().toLowerCase()}`));
     body.appendChild(buildSessionList(domain, own));
   }
 
@@ -1296,6 +1383,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         await setSessionLabel(session, select.value || null);
         renderHome();
         renderWhere();
+        // Relabelling can move a visit out of the group the drawer is scoped to,
+        // so the list has to be rebuilt rather than left showing a stale row.
+        renderDetail();
       });
 
       row.append(when, el('span', 'session-duration', formatTime(session.duration)), select);

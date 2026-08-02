@@ -1054,6 +1054,13 @@ body::before {
 
 .drawer-stat-value { font-size: 19px; }
 
+.drawer-scope-note {
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+
 .drawer-warning {
   margin-top: 12px;
   padding: 10px 12px;
